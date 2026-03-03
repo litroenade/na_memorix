@@ -19,6 +19,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 import numpy as np
+import tomlkit
 
 # 设置路径
 current_dir = Path(__file__).resolve().parent
@@ -49,6 +50,8 @@ try:
     from core.storage.graph_store import GraphStore
     from core.storage.metadata_store import MetadataStore
     from core.storage import QuantizationType, SparseMatrixFormat
+    from core.embedding import create_embedding_api_adapter
+    from core.utils.relation_write_service import RelationWriteService
     
 except ImportError as e:
     logger.error(f"无法导入 A_memorix 核心模块: {e}")
@@ -63,11 +66,13 @@ class LPMMConverter:
         output_dir: Path,
         dimension: int = 384,
         batch_size: int = 1024,
+        rebuild_relation_vectors: bool = True,
     ):
         self.lpmm_dir = lpmm_data_dir
         self.output_dir = output_dir
         self.dimension = dimension
         self.batch_size = max(1, int(batch_size))
+        self.rebuild_relation_vectors = bool(rebuild_relation_vectors)
         
         self.vector_dir = output_dir / "vectors"
         self.graph_dir = output_dir / "graph"
@@ -76,6 +81,8 @@ class LPMMConverter:
         self.vector_store = None
         self.graph_store = None
         self.metadata_store = None
+        self.embedding_manager = None
+        self.relation_write_service = None
         # LPMM 原 ID -> A_memorix ID 映射（用于图重写）
         self.id_mapping: Dict[str, str] = {}
 
@@ -127,6 +134,154 @@ class LPMMConverter:
         # 对于转换，我们假设是全新的开始或覆盖。
         # A_memorix 中的 MetadataStore 通常使用 SQLite。
         # 如果目录是新的，我们会依赖它创建新文件。
+        if self.rebuild_relation_vectors:
+            self._init_relation_vector_service()
+
+    def _load_plugin_config(self) -> Dict[str, Any]:
+        config_path = plugin_root / "config.toml"
+        if not config_path.exists():
+            return {}
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                parsed = tomlkit.load(f)
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        except Exception as e:
+            logger.warning(f"读取 config.toml 失败，使用默认 embedding 配置: {e}")
+            return {}
+
+    def _init_relation_vector_service(self) -> None:
+        if not self.rebuild_relation_vectors:
+            return
+        cfg = self._load_plugin_config()
+        emb_cfg = cfg.get("embedding", {}) if isinstance(cfg, dict) else {}
+        if not isinstance(emb_cfg, dict):
+            emb_cfg = {}
+        try:
+            self.embedding_manager = create_embedding_api_adapter(
+                batch_size=int(emb_cfg.get("batch_size", 32)),
+                max_concurrent=int(emb_cfg.get("max_concurrent", 5)),
+                default_dimension=int(emb_cfg.get("dimension", self.dimension)),
+                model_name=str(emb_cfg.get("model_name", "auto")),
+                retry_config=emb_cfg.get("retry", {}) if isinstance(emb_cfg.get("retry", {}), dict) else {},
+            )
+            self.relation_write_service = RelationWriteService(
+                metadata_store=self.metadata_store,
+                graph_store=self.graph_store,
+                vector_store=self.vector_store,
+                embedding_manager=self.embedding_manager,
+            )
+        except Exception as e:
+            self.embedding_manager = None
+            self.relation_write_service = None
+            logger.warning(f"初始化关系向量重建服务失败，将跳过关系向量回填: {e}")
+
+    async def _rebuild_relation_vectors(self) -> None:
+        if not self.rebuild_relation_vectors:
+            return
+        if self.relation_write_service is None:
+            logger.warning("关系向量重建已启用，但写入服务不可用，已跳过。")
+            return
+
+        rows = self.metadata_store.query(
+            "SELECT hash, subject, predicate, object FROM relations ORDER BY created_at ASC"
+        )
+        if not rows:
+            logger.info("未发现关系元数据，无需重建关系向量。")
+            return
+
+        success = 0
+        failed = 0
+        skipped = 0
+        for row in rows:
+            result = await self.relation_write_service.ensure_relation_vector(
+                hash_value=str(row["hash"]),
+                subject=str(row.get("subject", "")),
+                predicate=str(row.get("predicate", "")),
+                obj=str(row.get("object", "")),
+            )
+            if result.vector_state == "ready":
+                if result.vector_written:
+                    success += 1
+                else:
+                    skipped += 1
+            else:
+                failed += 1
+
+        logger.info(
+            "关系向量重建完成: total=%s success=%s skipped=%s failed=%s",
+            len(rows),
+            success,
+            skipped,
+            failed,
+        )
+
+    @staticmethod
+    def _parse_relation_text(text: str) -> Tuple[str, str, str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return "", "", ""
+        if "|" in raw:
+            parts = [p.strip() for p in raw.split("|") if p.strip()]
+            if len(parts) >= 3:
+                return parts[0], parts[1], parts[2]
+        if "->" in raw:
+            parts = [p.strip() for p in raw.split("->") if p.strip()]
+            if len(parts) >= 3:
+                return parts[0], parts[1], parts[2]
+        pieces = raw.split()
+        if len(pieces) >= 3:
+            return pieces[0], pieces[1], " ".join(pieces[2:])
+        return "", "", ""
+
+    def _import_relation_metadata_from_parquet(self, relation_path: Path) -> int:
+        if not relation_path.exists():
+            return 0
+
+        try:
+            parquet_file = pq.ParquetFile(relation_path)
+        except Exception as e:
+            logger.warning(f"读取 relation.parquet 失败，跳过关系元数据导入: {e}")
+            return 0
+
+        cols = set(parquet_file.schema_arrow.names)
+        has_triple_cols = {"subject", "predicate", "object"}.issubset(cols)
+        content_col = "str" if "str" in cols else ("content" if "content" in cols else "")
+
+        imported_hashes = set()
+        imported = 0
+        for record_batch in parquet_file.iter_batches(batch_size=self.batch_size):
+            df_batch = record_batch.to_pandas()
+            for _, row in df_batch.iterrows():
+                subject = ""
+                predicate = ""
+                obj = ""
+                if has_triple_cols:
+                    subject = str(row.get("subject", "") or "").strip()
+                    predicate = str(row.get("predicate", "") or "").strip()
+                    obj = str(row.get("object", "") or "").strip()
+                elif content_col:
+                    subject, predicate, obj = self._parse_relation_text(row.get(content_col, ""))
+
+                if not (subject and predicate and obj):
+                    continue
+
+                rel_hash = self.metadata_store.add_relation(
+                    subject=subject,
+                    predicate=predicate,
+                    obj=obj,
+                    source_paragraph=None,
+                )
+                if rel_hash in imported_hashes:
+                    continue
+                imported_hashes.add(rel_hash)
+                self.graph_store.add_edges([(subject, obj)], relation_hashes=[rel_hash])
+                try:
+                    self.metadata_store.set_relation_vector_state(rel_hash, "none")
+                except Exception:
+                    pass
+                imported += 1
+
+        return imported
         
     def convert_vectors(self):
         """将 Parquet 向量转换为 VectorStore"""
@@ -143,7 +298,11 @@ class LPMMConverter:
             # 关系向量在当前脚本中无法保证与 MetadataStore 的关系记录一一对应，
             # 直接导入会污染召回结果（命中后无法反查 relation 元数据）。
             if p_type == "relation":
-                logger.warning("跳过 relation.parquet 导入：当前版本仅导入 paragraph/entity 向量以保证一致性。")
+                relation_count = self._import_relation_metadata_from_parquet(p_path)
+                logger.warning(
+                    "跳过 relation.parquet 向量导入（保持一致性）；已导入关系元数据: %s",
+                    relation_count,
+                )
                 continue
 
             if not p_path.exists():
@@ -328,6 +487,9 @@ class LPMMConverter:
         self.initialize_stores()
         self.convert_vectors()
         self.convert_graph()
+        asyncio.run(self._rebuild_relation_vectors())
+        self.vector_store.save()
+        self.graph_store.save()
         self.metadata_store.close()
         logger.info("所有转换成功完成。")
 
@@ -338,6 +500,11 @@ def main():
     parser.add_argument("--output", "-o", required=True, help="A_memorix 数据的输出目录")
     parser.add_argument("--dim", type=int, default=384, help="Embedding 维度 (必须与 LPMM 模型匹配)")
     parser.add_argument("--batch-size", type=int, default=1024, help="Parquet 分批读取大小 (默认 1024)")
+    parser.add_argument(
+        "--skip-relation-vector-rebuild",
+        action="store_true",
+        help="跳过按关系元数据重建关系向量（默认开启）",
+    )
     
     args = parser.parse_args()
     
@@ -353,6 +520,7 @@ def main():
         output_path,
         dimension=args.dim,
         batch_size=args.batch_size,
+        rebuild_relation_vectors=not bool(args.skip_relation_vector_rebuild),
     )
     converter.run()
 

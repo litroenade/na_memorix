@@ -8,8 +8,9 @@ import os
 import pickle
 import hashlib
 import shutil
+import time
 from pathlib import Path
-from typing import Optional, Union, Tuple, List, Dict, Set
+from typing import Optional, Union, Tuple, List, Dict, Set, Any
 import random
 import threading  # Added threading import
 
@@ -290,42 +291,44 @@ class VectorStore:
         k: int = 10,
         filter_deleted: bool = True,
     ) -> Tuple[List[str], List[float]]:
-        
-        # 核心逻辑：主索引未就绪时，检查回退索引
-        # 使用 Double-Checked Locking 模式确保线程安全
-        if not self._is_trained or self._index.ntotal == 0:
-            with self._lock:
-                # 再次检查，防止多线程竞争导致的重复初始化
-                if not self._is_trained or self._index.ntotal == 0:
-                    self._flush_write_buffer()
-                    
-                    # 判断回退索引是否需要从磁盘自举 (重启动作)
-                    if self._bin_count > 0 and self._fallback_index.ntotal == 0:
-                        logger.info(f"Detecting data on disk ({self._bin_count}) but index not ready. Bootstrapping fallback index...")
-                        self._bootstrap_fallback_from_disk()
-                    
-                    # 尝试根据阈值强制训练
-                    min_train = getattr(self, "min_train_threshold", self.DEFAULT_MIN_TRAIN)
-                    if self._bin_count > 0 and self._bin_count >= min(min_train, self._bin_count) and not self._is_trained:
-                         # 只有达到 40 个或更多时才尝试训练，否则继续使用 Flat
-                         if self._bin_count >= min_train:
-                            self._force_train_small_data()
-            
-        # 最终搜索源选择 (Read is safe assuming _index ptr swap is atomic in Python, but structure mutation is protected)
+        # 查询路径仅负责检索，不在此触发训练/回放。
+        # 训练/回放前置到 warmup_index()，并由插件启动阶段触发。
+        with self._lock:
+            self._flush_write_buffer()
+
+        # 最终搜索源选择
         search_index = self._index if (self._is_trained and self._index.ntotal > 0) else self._fallback_index
         
         if search_index.ntotal == 0:
             logger.warning("Indices are empty. No data to search.")
             return [], []
 
-        if query.ndim == 1:
-            query = query.reshape(1, -1)
-            
-        query = np.ascontiguousarray(query, dtype=np.float32)
-        faiss.normalize_L2(query)
+        query_local = np.array(query, dtype=np.float32, order="C", copy=True)
+        if query_local.ndim == 1:
+            got_dim = int(query_local.shape[0])
+            query_local = query_local.reshape(1, -1)
+        elif query_local.ndim == 2:
+            if query_local.shape[0] != 1:
+                raise ValueError(
+                    f"query embedding must have shape (D,) or (1, D), got {tuple(query_local.shape)}"
+                )
+            got_dim = int(query_local.shape[1])
+        else:
+            raise ValueError(
+                f"query embedding must have shape (D,) or (1, D), got {tuple(query_local.shape)}"
+            )
+
+        if got_dim != self.dimension:
+            raise ValueError(
+                f"query embedding dimension mismatch: expected={self.dimension} got={got_dim}"
+            )
+        if not np.all(np.isfinite(query_local)):
+            raise ValueError("query embedding contains non-finite values")
+
+        faiss.normalize_L2(query_local)
         
         # 执行检索
-        dists, ids = search_index.search(query, k * 2)
+        dists, ids = search_index.search(query_local, k * 2)
         
         # Faiss search 返回的是 (1, K) 的数组，取第一行
         dists = dists[0]
@@ -349,6 +352,83 @@ class VectorStore:
             return [], []
             
         return [r[0] for r in results], [r[1] for r in results]
+
+    def warmup_index(self, force_train: bool = True) -> Dict[str, Any]:
+        """
+        预热向量索引（训练/回放前置），避免首个线上查询触发重初始化。
+
+        Args:
+            force_train: 是否在满足阈值时强制训练 SQ8 索引
+
+        Returns:
+            预热状态摘要
+        """
+        started = time.perf_counter()
+        logger.info(f"metric.vector_index_prewarm_started=1 force_train={bool(force_train)}")
+
+        try:
+            with self._lock:
+                self._flush_write_buffer()
+
+                if self._bin_path.exists():
+                    self._bin_count = self._bin_path.stat().st_size // (self.dimension * 2)
+                else:
+                    self._bin_count = 0
+
+                needs_fallback_bootstrap = (
+                    self._bin_count > 0
+                    and self._fallback_index.ntotal == 0
+                    and (not self._is_trained or self._index.ntotal == 0)
+                )
+                if needs_fallback_bootstrap:
+                    self._bootstrap_fallback_from_disk()
+
+                min_train = max(1, int(getattr(self, "min_train_threshold", self.DEFAULT_MIN_TRAIN)))
+                needs_train = (
+                    bool(force_train)
+                    and self._bin_count >= min_train
+                    and not self._is_trained
+                )
+                if needs_train:
+                    self._force_train_small_data()
+
+                duration_ms = (time.perf_counter() - started) * 1000.0
+                summary = {
+                    "ok": True,
+                    "trained": bool(self._is_trained),
+                    "index_ntotal": int(self._index.ntotal),
+                    "fallback_ntotal": int(self._fallback_index.ntotal),
+                    "bin_count": int(self._bin_count),
+                    "duration_ms": duration_ms,
+                    "error": None,
+                }
+        except Exception as e:
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            summary = {
+                "ok": False,
+                "trained": bool(self._is_trained),
+                "index_ntotal": int(self._index.ntotal) if self._index is not None else 0,
+                "fallback_ntotal": int(self._fallback_index.ntotal) if self._fallback_index is not None else 0,
+                "bin_count": int(getattr(self, "_bin_count", 0)),
+                "duration_ms": duration_ms,
+                "error": str(e),
+            }
+            logger.error(
+                "metric.vector_index_prewarm_fail=1 "
+                f"metric.vector_index_prewarm_duration_ms={duration_ms:.2f} "
+                f"error={e}"
+            )
+            return summary
+
+        logger.info(
+            "metric.vector_index_prewarm_success=1 "
+            f"metric.vector_index_prewarm_duration_ms={summary['duration_ms']:.2f} "
+            f"trained={summary['trained']} "
+            f"index_ntotal={summary['index_ntotal']} "
+            f"fallback_ntotal={summary['fallback_ntotal']} "
+            f"bin_count={summary['bin_count']}"
+        )
+        return summary
 
     def _bootstrap_fallback_from_disk(self):
         """重启后自举：从磁盘 vectors.bin 加载数据到 fallback 索引"""

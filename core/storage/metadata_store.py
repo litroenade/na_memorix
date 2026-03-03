@@ -153,6 +153,10 @@ class MetadataStore:
                 object TEXT NOT NULL,
                 vector_index INTEGER,
                 confidence REAL DEFAULT 1.0,
+                vector_state TEXT DEFAULT 'none',
+                vector_updated_at REAL,
+                vector_error TEXT,
+                vector_retry_count INTEGER DEFAULT 0,
                 created_at REAL,
                 source_paragraph TEXT,
                 metadata TEXT,
@@ -370,6 +374,10 @@ class MetadataStore:
                         object TEXT NOT NULL,
                         vector_index INTEGER,
                         confidence REAL DEFAULT 1.0,
+                        vector_state TEXT DEFAULT 'none',
+                        vector_updated_at REAL,
+                        vector_error TEXT,
+                        vector_retry_count INTEGER DEFAULT 0,
                         created_at REAL,
                         source_paragraph TEXT,
                         metadata TEXT,
@@ -389,6 +397,38 @@ class MetadataStore:
                 logger.info("Schema迁移完成：已添加V5记忆动态字段及回收站表")
             except sqlite3.OperationalError as e:
                 logger.warning(f"Schema迁移失败 (V5): {e}")
+
+        # 关系向量状态字段迁移
+        cursor.execute("PRAGMA table_info(relations)")
+        relation_columns = {row[1] for row in cursor.fetchall()}
+        relation_vector_columns = {
+            "vector_state": "ALTER TABLE relations ADD COLUMN vector_state TEXT DEFAULT 'none'",
+            "vector_updated_at": "ALTER TABLE relations ADD COLUMN vector_updated_at REAL",
+            "vector_error": "ALTER TABLE relations ADD COLUMN vector_error TEXT",
+            "vector_retry_count": "ALTER TABLE relations ADD COLUMN vector_retry_count INTEGER DEFAULT 0",
+        }
+        for col, sql in relation_vector_columns.items():
+            if col not in relation_columns:
+                try:
+                    cursor.execute(sql)
+                except sqlite3.OperationalError as e:
+                    logger.warning(f"Schema迁移失败 (relations.{col}): {e}")
+
+        # 回收站同步字段迁移（用于 restore 保留向量状态）
+        cursor.execute("PRAGMA table_info(deleted_relations)")
+        deleted_relation_columns = {row[1] for row in cursor.fetchall()}
+        deleted_relation_vector_columns = {
+            "vector_state": "ALTER TABLE deleted_relations ADD COLUMN vector_state TEXT DEFAULT 'none'",
+            "vector_updated_at": "ALTER TABLE deleted_relations ADD COLUMN vector_updated_at REAL",
+            "vector_error": "ALTER TABLE deleted_relations ADD COLUMN vector_error TEXT",
+            "vector_retry_count": "ALTER TABLE deleted_relations ADD COLUMN vector_retry_count INTEGER DEFAULT 0",
+        }
+        for col, sql in deleted_relation_vector_columns.items():
+            if col not in deleted_relation_columns:
+                try:
+                    cursor.execute(sql)
+                except sqlite3.OperationalError as e:
+                    logger.warning(f"Schema迁移失败 (deleted_relations.{col}): {e}")
 
         # 检查 entities 表是否有 is_deleted 列 (Soft Delete System)
         cursor.execute("PRAGMA table_info(entities)")
@@ -1754,6 +1794,116 @@ class MetadataStore:
 
         return deleted
 
+    def set_relation_vector_state(
+        self,
+        hash_value: str,
+        state: str,
+        error: Optional[str] = None,
+        bump_retry: bool = False,
+    ) -> bool:
+        """
+        更新关系向量状态。
+        """
+        state_norm = str(state or "").strip().lower()
+        if state_norm not in {"none", "pending", "ready", "failed"}:
+            raise ValueError(f"无效 vector_state: {state}")
+
+        now = datetime.now().timestamp()
+        err_text = (str(error).strip() if error is not None else None)
+        if err_text:
+            err_text = err_text[:500]
+        clear_error = state_norm in {"none", "pending", "ready"}
+
+        cursor = self._conn.cursor()
+        if bump_retry:
+            cursor.execute(
+                """
+                UPDATE relations
+                SET vector_state = ?,
+                    vector_updated_at = ?,
+                    vector_error = ?,
+                    vector_retry_count = COALESCE(vector_retry_count, 0) + 1
+                WHERE hash = ?
+                """,
+                (state_norm, now, None if clear_error else err_text, hash_value),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE relations
+                SET vector_state = ?,
+                    vector_updated_at = ?,
+                    vector_error = ?
+                WHERE hash = ?
+                """,
+                (state_norm, now, None if clear_error else err_text, hash_value),
+            )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def list_relations_by_vector_state(
+        self,
+        states: List[str],
+        limit: int = 200,
+        max_retry: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        根据向量状态列出关系，用于回填任务。
+        """
+        normalized_states = [
+            str(s or "").strip().lower()
+            for s in (states or [])
+            if str(s or "").strip()
+        ]
+        normalized_states = [
+            s for s in normalized_states
+            if s in {"none", "pending", "ready", "failed"}
+        ]
+        if not normalized_states:
+            return []
+
+        placeholders = ",".join(["?"] * len(normalized_states))
+        params: List[Any] = list(normalized_states)
+        sql = f"""
+            SELECT hash, subject, predicate, object, confidence, source_paragraph,
+                   vector_state, vector_updated_at, vector_error, vector_retry_count, created_at
+            FROM relations
+            WHERE vector_state IN ({placeholders})
+        """
+        if max_retry is not None:
+            sql += " AND COALESCE(vector_retry_count, 0) < ?"
+            params.append(int(max_retry))
+        sql += " ORDER BY COALESCE(vector_updated_at, created_at, 0) ASC LIMIT ?"
+        params.append(max(1, int(limit)))
+
+        cursor = self._conn.cursor()
+        cursor.execute(sql, tuple(params))
+        return [self._row_to_dict(row, "relation") for row in cursor.fetchall()]
+
+    def count_relations_by_vector_state(self) -> Dict[str, int]:
+        """
+        统计关系向量状态分布。
+        """
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT COALESCE(vector_state, 'none') AS state, COUNT(*) AS cnt
+            FROM relations
+            GROUP BY COALESCE(vector_state, 'none')
+            """
+        )
+        result: Dict[str, int] = {"none": 0, "pending": 0, "ready": 0, "failed": 0}
+        total = 0
+        for row in cursor.fetchall():
+            state = str(row["state"] or "none").lower()
+            count = int(row["cnt"] or 0)
+            if state not in result:
+                result[state] = 0
+            result[state] += count
+            total += count
+        result["total"] = total
+        return result
+
     def update_vector_index(
         self,
         item_type: str,
@@ -2173,10 +2323,12 @@ class MetadataStore:
             cursor.execute(f"""
                 INSERT OR REPLACE INTO deleted_relations 
                 (hash, subject, predicate, object, vector_index, confidence, created_at, 
+                 vector_state, vector_updated_at, vector_error, vector_retry_count,
                  source_paragraph, metadata, is_permanent, last_accessed, access_count,
                  is_inactive, inactive_since, is_pinned, protected_until, last_reinforced, deleted_at)
                 SELECT 
                  hash, subject, predicate, object, vector_index, confidence, created_at, 
+                 vector_state, vector_updated_at, vector_error, vector_retry_count,
                  source_paragraph, metadata, is_permanent, last_accessed, access_count,
                  is_inactive, inactive_since, is_pinned, protected_until, last_reinforced, ?
                 FROM relations

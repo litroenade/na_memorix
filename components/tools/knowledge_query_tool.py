@@ -22,8 +22,10 @@ from ...core import (
     ThresholdConfig,
     SparseBM25Config,
     FusionConfig,
+    RelationIntentConfig,
 )
 from ...core.utils.person_profile_service import PersonProfileService
+from ...core.utils.relation_query import parse_relation_query_spec
 from ...core.utils.search_execution_service import (
     SearchExecutionRequest,
     SearchExecutionService,
@@ -199,6 +201,9 @@ class KnowledgeQueryTool(BaseTool):
             fusion_cfg_raw = self.get_config("retrieval.fusion", {}) or {}
             if not isinstance(fusion_cfg_raw, dict):
                 fusion_cfg_raw = {}
+            relation_intent_cfg_raw = self.get_config("retrieval.search.relation_intent", {}) or {}
+            if not isinstance(relation_intent_cfg_raw, dict):
+                relation_intent_cfg_raw = {}
             try:
                 sparse_cfg = SparseBM25Config(**sparse_cfg_raw)
             except Exception as e:
@@ -209,6 +214,11 @@ class KnowledgeQueryTool(BaseTool):
             except Exception as e:
                 logger.warning(f"{self.log_prefix} fusion 配置非法，回退默认: {e}")
                 fusion_cfg = FusionConfig()
+            try:
+                relation_intent_cfg = RelationIntentConfig(**relation_intent_cfg_raw)
+            except Exception as e:
+                logger.warning(f"{self.log_prefix} relation_intent 配置非法，回退默认: {e}")
+                relation_intent_cfg = RelationIntentConfig()
             config = DualPathRetrieverConfig(
                 top_k_paragraphs=self.get_config("retrieval.top_k_paragraphs", 20),
                 top_k_relations=self.get_config("retrieval.top_k_relations", 10),
@@ -222,6 +232,7 @@ class KnowledgeQueryTool(BaseTool):
                 debug=self.debug_enabled,
                 sparse=sparse_cfg,
                 fusion=fusion_cfg,
+                relation_intent=relation_intent_cfg,
             )
 
             # 创建检索器
@@ -816,8 +827,8 @@ class KnowledgeQueryTool(BaseTool):
         path_trigger_threshold = self.get_config("retrieval.relation_path_trigger_threshold", 0.4)
 
         # 1. 结构化检测
-        # 如果包含明确的分隔符，视为结构化查询
-        is_structured = "|" in relation_spec or "->" in relation_spec
+        parsed = parse_relation_query_spec(relation_spec)
+        is_structured = parsed.is_structured
 
         # 2. 自然语言优先处理
         # 如果不是明确的结构化查询，且启用了回退（意味着支持语义模式），则直接使用语义检索
@@ -825,42 +836,15 @@ class KnowledgeQueryTool(BaseTool):
             return await self._semantic_search_relation(relation_spec, fallback_min_score)
 
         # 3. 结构化查询处理 (精确匹配)
-        subject, predicate, obj = None, None, None
-
-        if "|" in relation_spec:
-            parts = relation_spec.split("|")
-            if len(parts) >= 2:
-                subject = parts[0].strip()
-                predicate = parts[1].strip()
-                obj = parts[2].strip() if len(parts) > 2 else None
-        elif "->" in relation_spec:
-            # 支持两种箭头格式：
-            # 1) S->P->O：完整三元组
-            # 2) S->O：仅指定主语与宾语（谓语不限定）
-            parts = [p.strip() for p in relation_spec.split("->") if p.strip()]
-            if len(parts) >= 3:
-                subject = parts[0]
-                predicate = parts[1]
-                obj = parts[2]
-            elif len(parts) == 2:
-                subject = parts[0]
-                predicate = None
-                obj = parts[1]
-
-        if not subject: # 尝试空格解析 (Legacy)
-            parts = relation_spec.split(maxsplit=1)
-            if len(parts) >= 2:
-                subject = parts[0].strip()
-                predicate = parts[1].strip()
-                obj = None
-            else:
-                 # 无法解析为结构化，且没走 NL 路径 (说明 enable_fallback=False)
-                 return {
-                    "success": False,
-                    "error": "关系格式错误 (请使用 S|P|O 或开启语义回退)",
-                    "content": "❌ 关系格式错误: 请使用 'Subject|Predicate|Object' 格式",
-                    "results": [],
-                }
+        subject, predicate, obj = parsed.subject, parsed.predicate, parsed.object
+        if not subject or not predicate:
+            # 无法解析为结构化，且没走 NL 路径 (说明 enable_fallback=False)
+            return {
+                "success": False,
+                "error": "关系格式错误 (请使用 S|P|O 或开启语义回退)",
+                "content": "❌ 关系格式错误: 请使用 'Subject|Predicate|Object' 格式",
+                "results": [],
+            }
 
         # 执行精确查询
         relations = self.metadata_store.get_relations(
@@ -1167,7 +1151,14 @@ class KnowledgeQueryTool(BaseTool):
                 "num_entities": self.metadata_store.count_entities() if self.metadata_store else 0,
             },
             "sparse": self.sparse_index.stats() if self.sparse_index else None,
+            "relation_vectorization": {},
         }
+        plugin_instance = self.plugin_config.get("plugin_instance")
+        if plugin_instance is not None and hasattr(plugin_instance, "get_relation_vector_stats"):
+            try:
+                stats["relation_vectorization"] = plugin_instance.get_relation_vector_stats()
+            except Exception as e:
+                logger.warning(f"{self.log_prefix} 获取关系向量统计失败: {e}")
 
         # Format a human-readable summary
         content = (
@@ -1191,6 +1182,24 @@ class KnowledgeQueryTool(BaseTool):
                 f"  - 已加载: {'是' if sparse_stats.get('loaded') else '否'}\n"
                 f"  - Tokenizer: {sparse_stats.get('tokenizer_mode', 'N/A')}\n"
                 f"  - FTS文档数: {sparse_stats.get('doc_count', 0)}"
+            )
+
+        rel_stats = stats.get("relation_vectorization") or {}
+        rel_states = rel_stats.get("states") if isinstance(rel_stats, dict) else None
+        if rel_states:
+            ready_cov = float(rel_stats.get("relation_ready_coverage", 0.0) or 0.0) * 100
+            vector_cov = float(rel_stats.get("relation_vector_coverage", 0.0) or 0.0) * 100
+            content += (
+                f"\n\n🧠 关系向量化:\n"
+                f"  - total: {rel_states.get('total', 0)}\n"
+                f"  - ready: {rel_states.get('ready', 0)}\n"
+                f"  - pending: {rel_states.get('pending', 0)}\n"
+                f"  - failed: {rel_states.get('failed', 0)}\n"
+                f"  - none: {rel_states.get('none', 0)}\n"
+                f"  - orphan_vectors: {rel_stats.get('orphan_vectors', 0)}\n"
+                f"  - ready_coverage: {ready_cov:.1f}%\n"
+                f"  - vector_coverage: {vector_cov:.1f}%\n"
+                f"  - ready_but_missing_vector: {rel_stats.get('ready_but_missing_vector', 0)}"
             )
 
         return {

@@ -49,6 +49,7 @@ compute_hash = None
 normalize_text = None
 atomic_write = None
 model_config = None
+RelationWriteService = None
 
 
 logger = logging.getLogger("A_Memorix.MaiBotMigration")
@@ -125,6 +126,7 @@ def _bootstrap_runtime_symbols() -> None:
     global compute_hash
     global normalize_text
     global atomic_write
+    global RelationWriteService
     global logger
 
     if VectorStore is not None and compute_hash is not None and atomic_write is not None:
@@ -145,6 +147,7 @@ def _bootstrap_runtime_symbols() -> None:
     knowledge_types_module = importlib.import_module(f"{pkg}.storage.knowledge_types")
     hash_module = importlib.import_module(f"{pkg}.utils.hash")
     io_module = importlib.import_module(f"{pkg}.utils.io")
+    relation_write_service_module = importlib.import_module(f"{pkg}.utils.relation_write_service")
 
     VectorStore = vector_store_module.VectorStore
     GraphStore = graph_store_module.GraphStore
@@ -155,6 +158,7 @@ def _bootstrap_runtime_symbols() -> None:
     compute_hash = hash_module.compute_hash
     normalize_text = hash_module.normalize_text
     atomic_write = io_module.atomic_write
+    RelationWriteService = relation_write_service_module.RelationWriteService
 
 
 def _load_embedding_adapter_factory() -> None:
@@ -593,6 +597,7 @@ class MigrationRunner:
         self.graph_store = None
         self.metadata_store = None
         self.embedding_manager = None
+        self.relation_write_service = None
         self.plugin_config: Dict[str, Any] = {}
         self.embed_workers: int = 5
 
@@ -617,6 +622,9 @@ class MigrationRunner:
             "paragraph_vectors_added": 0,
             "entity_vectors_added": 0,
             "relations_written": 0,
+            "relation_vectors_written": 0,
+            "relation_vectors_failed": 0,
+            "relation_vectors_skipped": 0,
             "graph_edges_written": 0,
             "windows_committed": 0,
             "last_committed_id": 0,
@@ -797,10 +805,59 @@ class MigrationRunner:
         if self.graph_store.has_data():
             self.graph_store.load()
 
+        self.relation_write_service = None
+        if require_embedding and RelationWriteService is not None and self.embedding_manager is not None:
+            self.relation_write_service = RelationWriteService(
+                metadata_store=self.metadata_store,
+                graph_store=self.graph_store,
+                vector_store=self.vector_store,
+                embedding_manager=self.embedding_manager,
+            )
+
         logger.info(
             f"目标存储初始化完成: dim={self.vector_store.dimension}, quant={q_type}, graph_fmt={matrix_fmt}, "
             f"embed_workers={self.embed_workers}"
         )
+
+    def _should_write_relation_vectors(self) -> bool:
+        retrieval_cfg = self.plugin_config.get("retrieval", {}) if isinstance(self.plugin_config, dict) else {}
+        if not isinstance(retrieval_cfg, dict):
+            return False
+        rv_cfg = retrieval_cfg.get("relation_vectorization", {})
+        if not isinstance(rv_cfg, dict):
+            return False
+        return bool(rv_cfg.get("enabled", False)) and bool(rv_cfg.get("write_on_import", True))
+
+    async def _ensure_relation_vectors_for_records(
+        self,
+        relation_records: Dict[str, Tuple[str, str, str, float, Optional[str], bytes]],
+    ) -> None:
+        if not relation_records:
+            return
+        if self.relation_write_service is None:
+            return
+
+        success = 0
+        failed = 0
+        skipped = 0
+        for relation_hash, rel in relation_records.items():
+            result = await self.relation_write_service.ensure_relation_vector(
+                hash_value=relation_hash,
+                subject=str(rel[0]),
+                predicate=str(rel[1]),
+                obj=str(rel[2]),
+            )
+            if result.vector_state == "ready":
+                if result.vector_written:
+                    success += 1
+                else:
+                    skipped += 1
+            else:
+                failed += 1
+
+        self.stats["relation_vectors_written"] += success
+        self.stats["relation_vectors_failed"] += failed
+        self.stats["relation_vectors_skipped"] += skipped
 
     def _build_selection_filter(self) -> SelectionFilter:
         if self.args.start_id is not None and self.args.start_id <= 0:
@@ -1361,6 +1418,9 @@ class MigrationRunner:
                 self.graph_store.add_edges(edge_pairs, relation_hashes=relation_hashes)
             self.stats["graph_edges_written"] += len(edge_pairs)
 
+            if self._should_write_relation_vectors():
+                await self._ensure_relation_vectors_for_records(relation_records)
+
         para_added = await self._embed_and_add_vectors(
             id_to_text=paragraph_embed_map,
             batch_size=max(1, int(self.args.embed_batch_size)),
@@ -1543,6 +1603,12 @@ class MigrationRunner:
         print(f"paragraph_vectors_added: {self.stats['paragraph_vectors_added']}")
         print(f"entity_vectors_added: {self.stats['entity_vectors_added']}")
         print(f"relations_written: {self.stats['relations_written']}")
+        print(
+            "relation_vectors: "
+            f"written={self.stats['relation_vectors_written']}, "
+            f"failed={self.stats['relation_vectors_failed']}, "
+            f"skipped={self.stats['relation_vectors_skipped']}"
+        )
         print(f"graph_edges_written: {self.stats['graph_edges_written']}")
         print(f"windows_committed: {self.stats['windows_committed']}")
         print(f"last_committed_id: {self.stats['last_committed_id']}")

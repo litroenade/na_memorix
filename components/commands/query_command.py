@@ -25,9 +25,11 @@ from ...core import (
     ThresholdConfig,
     SparseBM25Config,
     FusionConfig,
+    RelationIntentConfig,
 )
 from ...core.utils.time_parser import parse_query_time_range
 from ...core.utils.person_profile_service import PersonProfileService
+from ...core.utils.relation_query import parse_relation_query_spec
 
 logger = get_logger("A_Memorix.QueryCommand")
 
@@ -139,6 +141,9 @@ class QueryCommand(BaseCommand):
             fusion_cfg_raw = self.get_config("retrieval.fusion", {}) or {}
             if not isinstance(fusion_cfg_raw, dict):
                 fusion_cfg_raw = {}
+            relation_intent_cfg_raw = self.get_config("retrieval.search.relation_intent", {}) or {}
+            if not isinstance(relation_intent_cfg_raw, dict):
+                relation_intent_cfg_raw = {}
             try:
                 sparse_cfg = SparseBM25Config(**sparse_cfg_raw)
             except Exception as e:
@@ -149,6 +154,11 @@ class QueryCommand(BaseCommand):
             except Exception as e:
                 logger.warning(f"{self.log_prefix} fusion 配置非法，回退默认: {e}")
                 fusion_cfg = FusionConfig()
+            try:
+                relation_intent_cfg = RelationIntentConfig(**relation_intent_cfg_raw)
+            except Exception as e:
+                logger.warning(f"{self.log_prefix} relation_intent 配置非法，回退默认: {e}")
+                relation_intent_cfg = RelationIntentConfig()
             config = DualPathRetrieverConfig(
                 top_k_paragraphs=self.get_config("retrieval.top_k_paragraphs", 20),
                 top_k_relations=self.get_config("retrieval.top_k_relations", 10),
@@ -162,6 +172,7 @@ class QueryCommand(BaseCommand):
                 debug=self.debug_enabled,
                 sparse=sparse_cfg,
                 fusion=fusion_cfg,
+                relation_intent=relation_intent_cfg,
             )
 
             # 创建检索器
@@ -482,21 +493,15 @@ class QueryCommand(BaseCommand):
         Returns:
             Tuple[bool, str]: (是否成功, 结果消息)
         """
-        # 解析关系规格
-        if "|" in relation_spec:
-            parts = relation_spec.split("|")
-            if len(parts) < 2:
-                return False, "❌ 关系格式错误，应使用: subject|predicate 或 subject|predicate|object"
-            subject = parts[0].strip()
-            predicate = parts[1].strip()
-            obj = parts[2].strip() if len(parts) > 2 else None
-        else:
-            parts = relation_spec.split(maxsplit=1)
-            if len(parts) < 2:
-                return False, "❌ 关系格式错误，应使用: subject predicate"
-            subject = parts[0].strip()
-            predicate = parts[1].strip()
-            obj = None
+        parsed = parse_relation_query_spec(relation_spec)
+        if parsed.error in {"empty", "invalid_pipe_format", "invalid_arrow_format"}:
+            return False, "❌ 关系格式错误，应使用: subject|predicate 或 subject|predicate|object"
+
+        subject = parsed.subject
+        predicate = parsed.predicate
+        obj = parsed.object
+        if not subject or not predicate:
+            return False, "❌ 关系格式错误，应使用: subject|predicate 或 subject|predicate|object"
 
         # 查询关系
         relations = self.metadata_store.get_relations(
@@ -610,7 +615,14 @@ class QueryCommand(BaseCommand):
                 "实体数": self.metadata_store.count_entities() if self.metadata_store else 0,
             },
             "sparse": self.sparse_index.stats() if self.sparse_index else None,
+            "relation_vectorization": {},
         }
+        plugin_instance = self.plugin_config.get("plugin_instance")
+        if plugin_instance is not None and hasattr(plugin_instance, "get_relation_vector_stats"):
+            try:
+                stats["relation_vectorization"] = plugin_instance.get_relation_vector_stats()
+            except Exception as e:
+                logger.warning(f"{self.log_prefix} 读取关系向量统计失败: {e}")
         
         # 获取知识类型分布
         type_distribution = {}
@@ -653,6 +665,25 @@ class QueryCommand(BaseCommand):
                 f"  - 已加载: {'是' if sparse_stats.get('loaded') else '否'}",
                 f"  - Tokenizer: {sparse_stats.get('tokenizer_mode', 'N/A')}",
                 f"  - FTS文档数: {sparse_stats.get('doc_count', 0)}",
+            ])
+
+        rel_vec_stats = stats.get("relation_vectorization") or {}
+        rel_state_stats = rel_vec_stats.get("states") if isinstance(rel_vec_stats, dict) else None
+        if rel_state_stats:
+            ready_cov = float(rel_vec_stats.get("relation_ready_coverage", 0.0) or 0.0) * 100
+            vector_cov = float(rel_vec_stats.get("relation_vector_coverage", 0.0) or 0.0) * 100
+            lines.extend([
+                "",
+                "🧠 关系向量化:",
+                f"  - total: {rel_state_stats.get('total', 0)}",
+                f"  - ready: {rel_state_stats.get('ready', 0)}",
+                f"  - pending: {rel_state_stats.get('pending', 0)}",
+                f"  - failed: {rel_state_stats.get('failed', 0)}",
+                f"  - none: {rel_state_stats.get('none', 0)}",
+                f"  - orphan_vectors: {rel_vec_stats.get('orphan_vectors', 0)}",
+                f"  - ready_coverage: {ready_cov:.1f}%",
+                f"  - vector_coverage: {vector_cov:.1f}%",
+                f"  - ready_but_missing_vector: {rel_vec_stats.get('ready_but_missing_vector', 0)}",
             ])
         
         # 添加类型分布

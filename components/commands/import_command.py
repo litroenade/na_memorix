@@ -29,6 +29,7 @@ from ...core import (
     get_type_display_name,
 )
 from ...core.utils.time_parser import normalize_time_meta
+from ...core.utils.relation_write_service import RelationWriteService
 
 logger = get_logger("A_Memorix.ImportCommand")
 
@@ -61,6 +62,7 @@ class ImportCommand(BaseCommand):
         self.graph_store: Optional[GraphStore] = self.plugin_config.get("graph_store")
         self.metadata_store: Optional[MetadataStore] = self.plugin_config.get("metadata_store")
         self.embedding_manager: Optional[EmbeddingAPIAdapter] = self.plugin_config.get("embedding_manager")
+        self.relation_write_service: Optional[RelationWriteService] = self.plugin_config.get("relation_write_service")
 
         # 兜底逻辑：如果配置中没有存储实例，尝试直接从插件系统获取
         # 使用 is not None 检查，因为空对象可能布尔值为 False
@@ -77,6 +79,7 @@ class ImportCommand(BaseCommand):
                 self.graph_store = self.graph_store or instances.get("graph_store")
                 self.metadata_store = self.metadata_store or instances.get("metadata_store")
                 self.embedding_manager = self.embedding_manager or instances.get("embedding_manager")
+                self.relation_write_service = self.relation_write_service or instances.get("relation_write_service")
 
         # 设置日志前缀
         if self.message and self.message.chat_stream:
@@ -494,8 +497,27 @@ class ImportCommand(BaseCommand):
             关系hash值
         """
         # 添加实体到图 (并向量化)
-        await self._add_entity_with_vector(subject)
-        await self._add_entity_with_vector(obj)
+        await self._add_entity_with_vector(subject, source_paragraph=source_paragraph)
+        await self._add_entity_with_vector(obj, source_paragraph=source_paragraph)
+
+        rv_enabled = bool(self.get_config("retrieval.relation_vectorization.enabled", False))
+        write_on_import = bool(self.get_config("retrieval.relation_vectorization.write_on_import", True))
+        write_vector = rv_enabled and write_on_import
+
+        if self.relation_write_service is not None:
+            result = await self.relation_write_service.upsert_relation_with_vector(
+                subject=subject,
+                predicate=predicate,
+                obj=obj,
+                confidence=confidence,
+                source_paragraph=source_paragraph,
+                write_vector=write_vector,
+            )
+            logger.debug(
+                f"{self.log_prefix} 添加关系: {subject} {predicate} {obj}, "
+                f"hash={result.hash_value[:16]}..., vector_state={result.vector_state}"
+            )
+            return result.hash_value
 
         # 添加关系到metadata store
         hash_value = self.metadata_store.add_relation(
@@ -508,6 +530,10 @@ class ImportCommand(BaseCommand):
 
         # 添加关系到图（写入 relation_hashes，确保删除/修剪可精确回溯）
         self.graph_store.add_edges([(subject, obj)], relation_hashes=[hash_value])
+        try:
+            self.metadata_store.set_relation_vector_state(hash_value, "none")
+        except Exception:
+            pass
 
         logger.debug(
             f"{self.log_prefix} 添加关系: {subject} {predicate} {obj}, "

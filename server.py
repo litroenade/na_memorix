@@ -1012,26 +1012,59 @@ class MemorixServer:
             try:
                 # 确保节点存在
                 self.plugin.graph_store.add_nodes([data.source, data.target])
-                
-                # 1. 如果有语义关系，先存入 MetadataStore
-                if data.predicate and self.plugin.metadata_store:
-                   self.plugin.metadata_store.add_relation(
-                       subject=data.source, 
-                       predicate=data.predicate, 
-                       obj=data.target,
-                       confidence=data.weight
-                   )
 
-                # 2. 使用 GraphStore.add_edges 方法建立物理连接
-                added_count = self.plugin.graph_store.add_edges(
-                    [(data.source, data.target)],
-                    weights=[data.weight]
-                )
+                added_count = 0
+                relation_hash = None
+                # 1. 如果有语义关系，优先走统一关系写入服务
+                if data.predicate and self.plugin.metadata_store:
+                    relation_service = getattr(self.plugin, "relation_write_service", None)
+                    write_vector = False
+                    if hasattr(self.plugin, "should_write_relation_vector_on_import"):
+                        write_vector = bool(self.plugin.should_write_relation_vector_on_import())
+                    if relation_service is not None:
+                        result = await relation_service.upsert_relation_with_vector(
+                            subject=data.source,
+                            predicate=data.predicate,
+                            obj=data.target,
+                            confidence=data.weight,
+                            source_paragraph="webui_edge",
+                            write_vector=write_vector,
+                        )
+                        relation_hash = result.hash_value
+                        added_count = 1
+                    else:
+                        relation_hash = self.plugin.metadata_store.add_relation(
+                            subject=data.source,
+                            predicate=data.predicate,
+                            obj=data.target,
+                            confidence=data.weight,
+                        )
+                        self.plugin.graph_store.add_edges(
+                            [(data.source, data.target)],
+                            weights=[data.weight],
+                            relation_hashes=[relation_hash],
+                        )
+                        try:
+                            self.plugin.metadata_store.set_relation_vector_state(relation_hash, "none")
+                        except Exception:
+                            pass
+                        added_count = 1
+                else:
+                    # 2. 无谓词时仅建立物理连接
+                    added_count = self.plugin.graph_store.add_edges(
+                        [(data.source, data.target)],
+                        weights=[data.weight]
+                    )
                 
                 # 持久化保存
                 self.plugin.graph_store.save()
                 self._invalidate_relation_cache("create_edge")
-                return {"success": True, "added_count": added_count, "predicate": data.predicate}
+                return {
+                    "success": True,
+                    "added_count": added_count,
+                    "predicate": data.predicate,
+                    "relation_hash": relation_hash,
+                }
             except Exception as e:
                 logger.error(f"Create edge failed: {e}")
                 raise HTTPException(status_code=500, detail=str(e))

@@ -21,6 +21,7 @@ from ...core import (
     ThresholdMethod,
     SparseBM25Config,
     FusionConfig,
+    RelationIntentConfig,
 )
 from ...core.utils.search_execution_service import (
     SearchExecutionRequest,
@@ -166,6 +167,9 @@ class KnowledgeSearchAction(BaseAction):
             fusion_cfg_raw = self.get_config("retrieval.fusion", {}) or {}
             if not isinstance(fusion_cfg_raw, dict):
                 fusion_cfg_raw = {}
+            relation_intent_cfg_raw = self.get_config("retrieval.search.relation_intent", {}) or {}
+            if not isinstance(relation_intent_cfg_raw, dict):
+                relation_intent_cfg_raw = {}
             try:
                 sparse_cfg = SparseBM25Config(**sparse_cfg_raw)
             except Exception as e:
@@ -176,6 +180,11 @@ class KnowledgeSearchAction(BaseAction):
             except Exception as e:
                 logger.warning(f"{self.log_prefix} fusion 配置非法，回退默认: {e}")
                 fusion_cfg = FusionConfig()
+            try:
+                relation_intent_cfg = RelationIntentConfig(**relation_intent_cfg_raw)
+            except Exception as e:
+                logger.warning(f"{self.log_prefix} relation_intent 配置非法，回退默认: {e}")
+                relation_intent_cfg = RelationIntentConfig()
 
             config = DualPathRetrieverConfig(
                 top_k_paragraphs=self.get_config("retrieval.top_k_paragraphs", 20),
@@ -190,6 +199,7 @@ class KnowledgeSearchAction(BaseAction):
                 debug=self.debug_enabled,
                 sparse=sparse_cfg,
                 fusion=fusion_cfg,
+                relation_intent=relation_intent_cfg,
             )
 
             # 创建检索器

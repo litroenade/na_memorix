@@ -14,6 +14,9 @@ from ...core import (
     DualPathRetriever,
     RetrievalStrategy,
     DualPathRetrieverConfig,
+    SparseBM25Config,
+    FusionConfig,
+    RelationIntentConfig,
 )
 
 logger = get_logger("A_Memorix.MemoryCommand")
@@ -43,6 +46,8 @@ class MemoryMaintenanceCommand(BaseCommand):
         self.vector_store = self.plugin_config.get("vector_store")
         self.graph_store = self.plugin_config.get("graph_store")
         self.metadata_store = self.plugin_config.get("metadata_store")
+        self.relation_write_service = self.plugin_config.get("relation_write_service")
+        self.sparse_index = self.plugin_config.get("sparse_index")
         
         if not all([self.vector_store, self.graph_store, self.metadata_store]):
             from ...plugin import A_MemorixPlugin
@@ -50,6 +55,8 @@ class MemoryMaintenanceCommand(BaseCommand):
             if instances:
                 self.graph_store = self.graph_store or instances.get("graph_store")
                 self.metadata_store = self.metadata_store or instances.get("metadata_store")
+                self.relation_write_service = self.relation_write_service or instances.get("relation_write_service")
+                self.sparse_index = self.sparse_index or instances.get("sparse_index")
         
         self.embedding_manager = self.plugin_config.get("embedding_manager")
         if not self.embedding_manager:
@@ -63,11 +70,43 @@ class MemoryMaintenanceCommand(BaseCommand):
         try:
             if not all([self.vector_store, self.graph_store, self.metadata_store, self.embedding_manager]):
                 return
-                
+
+            sparse_cfg_raw = self.get_config("retrieval.sparse", {}) or {}
+            if not isinstance(sparse_cfg_raw, dict):
+                sparse_cfg_raw = {}
+            fusion_cfg_raw = self.get_config("retrieval.fusion", {}) or {}
+            if not isinstance(fusion_cfg_raw, dict):
+                fusion_cfg_raw = {}
+            relation_intent_cfg_raw = self.get_config("retrieval.search.relation_intent", {}) or {}
+            if not isinstance(relation_intent_cfg_raw, dict):
+                relation_intent_cfg_raw = {}
+
+            try:
+                sparse_cfg = SparseBM25Config(**sparse_cfg_raw)
+            except Exception:
+                sparse_cfg = SparseBM25Config()
+            try:
+                fusion_cfg = FusionConfig(**fusion_cfg_raw)
+            except Exception:
+                fusion_cfg = FusionConfig()
+            try:
+                relation_intent_cfg = RelationIntentConfig(**relation_intent_cfg_raw)
+            except Exception:
+                relation_intent_cfg = RelationIntentConfig()
+
             config = DualPathRetrieverConfig(
                 retrieval_strategy=RetrievalStrategy.DUAL_PATH,
+                top_k_paragraphs=self.get_config("retrieval.top_k_paragraphs", 20),
+                top_k_relations=self.get_config("retrieval.top_k_relations", 10),
                 top_k_final=10,
-                enable_ppr=True
+                alpha=self.get_config("retrieval.alpha", 0.5),
+                enable_ppr=bool(self.get_config("retrieval.enable_ppr", True)),
+                ppr_alpha=self.get_config("retrieval.ppr_alpha", 0.85),
+                ppr_concurrency_limit=self.get_config("retrieval.ppr_concurrency_limit", 4),
+                enable_parallel=self.get_config("retrieval.enable_parallel", True),
+                sparse=sparse_cfg,
+                fusion=fusion_cfg,
+                relation_intent=relation_intent_cfg,
             )
             
             self.retriever = DualPathRetriever(
@@ -75,6 +114,7 @@ class MemoryMaintenanceCommand(BaseCommand):
                 graph_store=self.graph_store,
                 metadata_store=self.metadata_store,
                 embedding_manager=self.embedding_manager,
+                sparse_index=self.sparse_index,
                 config=config,
             )
         except Exception as e:
@@ -325,6 +365,23 @@ class MemoryMaintenanceCommand(BaseCommand):
             msg = f"[{subject}]->[{obj}]"
             if not graph_restored:
                 msg += "(仅元数据)"
+            else:
+                rv_cfg = self.get_config("retrieval.relation_vectorization", {}) or {}
+                rv_enabled = bool(rv_cfg.get("enabled", False)) if isinstance(rv_cfg, dict) else False
+                if rv_enabled and self.metadata_store:
+                    has_vector = bool(self.vector_store and h in self.vector_store)
+                    if has_vector:
+                        try:
+                            self.metadata_store.set_relation_vector_state(h, "ready")
+                        except Exception:
+                            pass
+                    else:
+                        # 不阻塞 restore，交给后台回填任务处理
+                        try:
+                            self.metadata_store.set_relation_vector_state(h, "pending")
+                        except Exception:
+                            pass
+                        msg += "(待回填向量)"
             msgs.append(msg)
             restored_count += 1
             

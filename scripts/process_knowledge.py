@@ -66,6 +66,7 @@ try:
     MetadataStore = core_module.MetadataStore
     create_embedding_api_adapter = core_module.create_embedding_api_adapter
     KnowledgeType = core_module.KnowledgeType
+    RelationWriteService = getattr(core_module, "RelationWriteService", None)
 
     storage_module = importlib.import_module(f"plugins.{plugin_name}.core.storage")
     detect_knowledge_type = storage_module.detect_knowledge_type
@@ -103,6 +104,7 @@ class AutoImporter:
         self.graph_store: Optional[GraphStore] = None
         self.metadata_store: Optional[MetadataStore] = None
         self.embedding_manager = None
+        self.relation_write_service = None
         self.plugin_config = {}
         self.manifest = {}
         self.force = force
@@ -188,9 +190,26 @@ class AutoImporter:
         
         self.metadata_store = MetadataStore(data_dir=DATA_DIR / "metadata")
         self.metadata_store.connect()
+
+        if RelationWriteService is not None:
+            self.relation_write_service = RelationWriteService(
+                metadata_store=self.metadata_store,
+                graph_store=self.graph_store,
+                vector_store=self.vector_store,
+                embedding_manager=self.embedding_manager,
+            )
         
         if self.vector_store.has_data(): self.vector_store.load()
         if self.graph_store.has_data(): self.graph_store.load()
+
+    def _should_write_relation_vectors(self) -> bool:
+        retrieval_cfg = self.plugin_config.get("retrieval", {})
+        if not isinstance(retrieval_cfg, dict):
+            return False
+        rv_cfg = retrieval_cfg.get("relation_vectorization", {})
+        if not isinstance(rv_cfg, dict):
+            return False
+        return bool(rv_cfg.get("enabled", False)) and bool(rv_cfg.get("write_on_import", True))
 
     def load_file(self, file_path: Path) -> str:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -626,8 +645,33 @@ Chat paragraph:
                     if s and p and o:
                         await self._add_entity_with_vector(s, source_paragraph=h_val)
                         await self._add_entity_with_vector(o, source_paragraph=h_val)
-                        rel_hash = self.metadata_store.add_relation(s, p, o, source_paragraph=h_val)
-                        self.graph_store.add_edges([(s, o)], relation_hashes=[rel_hash])
+                        confidence = float(rel.get("confidence", 1.0) or 1.0)
+                        rel_meta = rel.get("metadata", {})
+                        write_vector = self._should_write_relation_vectors()
+                        if self.relation_write_service is not None:
+                            await self.relation_write_service.upsert_relation_with_vector(
+                                subject=s,
+                                predicate=p,
+                                obj=o,
+                                confidence=confidence,
+                                source_paragraph=h_val,
+                                metadata=rel_meta if isinstance(rel_meta, dict) else {},
+                                write_vector=write_vector,
+                            )
+                        else:
+                            rel_hash = self.metadata_store.add_relation(
+                                s,
+                                p,
+                                o,
+                                confidence=confidence,
+                                source_paragraph=h_val,
+                                metadata=rel_meta if isinstance(rel_meta, dict) else {},
+                            )
+                            self.graph_store.add_edges([(s, o)], relation_hashes=[rel_hash])
+                            try:
+                                self.metadata_store.set_relation_vector_state(rel_hash, "none")
+                            except Exception:
+                                pass
                         
                 if progress_callback: progress_callback(1)
     

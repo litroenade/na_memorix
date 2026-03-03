@@ -25,6 +25,7 @@ from ..storage import (
     get_knowledge_type_from_string
 )
 from ..embedding import EmbeddingAPIAdapter
+from .relation_write_service import RelationWriteService
 
 logger = get_logger("A_Memorix.SummaryImporter")
 
@@ -68,6 +69,11 @@ class SummaryImporter:
         self.metadata_store = metadata_store
         self.embedding_manager = embedding_manager
         self.plugin_config = plugin_config
+        self.relation_write_service: Optional[RelationWriteService] = (
+            plugin_config.get("relation_write_service")
+            if isinstance(plugin_config, dict)
+            else None
+        )
 
     def _normalize_summary_model_selectors(self, raw_value: Any) -> List[str]:
         """标准化 summarization.model_name 配置，兼容字符串和字符串数组。"""
@@ -362,18 +368,36 @@ class SummaryImporter:
             self.graph_store.add_nodes(entities)
 
         # 导入关系
+        rv_cfg = self.plugin_config.get("retrieval", {}).get("relation_vectorization", {})
+        if not isinstance(rv_cfg, dict):
+            rv_cfg = {}
+        write_vector = bool(rv_cfg.get("enabled", False)) and bool(rv_cfg.get("write_on_import", True))
         for rel in relations:
             s, p, o = rel.get("subject"), rel.get("predicate"), rel.get("object")
             if all([s, p, o]):
-                # 写入元数据
-                rel_hash = self.metadata_store.add_relation(
-                    subject=s,
-                    predicate=p,
-                    obj=o,
-                    confidence=1.0,
-                    source_paragraph=summary
-                )
-                # 写入图数据库（写入 relation_hashes，确保后续可按关系精确修剪）
-                self.graph_store.add_edges([(s, o)], relation_hashes=[rel_hash])
+                if self.relation_write_service is not None:
+                    await self.relation_write_service.upsert_relation_with_vector(
+                        subject=s,
+                        predicate=p,
+                        obj=o,
+                        confidence=1.0,
+                        source_paragraph=summary,
+                        write_vector=write_vector,
+                    )
+                else:
+                    # 写入元数据
+                    rel_hash = self.metadata_store.add_relation(
+                        subject=s,
+                        predicate=p,
+                        obj=o,
+                        confidence=1.0,
+                        source_paragraph=summary
+                    )
+                    # 写入图数据库（写入 relation_hashes，确保后续可按关系精确修剪）
+                    self.graph_store.add_edges([(s, o)], relation_hashes=[rel_hash])
+                    try:
+                        self.metadata_store.set_relation_vector_state(rel_hash, "none")
+                    except Exception:
+                        pass
                 
         logger.info(f"总结导入完成: hash={hash_value[:8]}")

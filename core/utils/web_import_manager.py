@@ -3046,6 +3046,23 @@ class ImportTaskManager:
     async def _add_relation(self, subject: str, predicate: str, obj: str, source_paragraph: str = "") -> str:
         await self._add_entity_with_vector(subject, source_paragraph=source_paragraph)
         await self._add_entity_with_vector(obj, source_paragraph=source_paragraph)
+        rv_cfg = self.plugin.get_config("retrieval.relation_vectorization", {}) or {}
+        if not isinstance(rv_cfg, dict):
+            rv_cfg = {}
+        write_vector = bool(rv_cfg.get("enabled", False)) and bool(rv_cfg.get("write_on_import", True))
+
+        relation_service = getattr(self.plugin, "relation_write_service", None)
+        if relation_service is not None:
+            result = await relation_service.upsert_relation_with_vector(
+                subject=subject,
+                predicate=predicate,
+                obj=obj,
+                confidence=1.0,
+                source_paragraph=source_paragraph,
+                write_vector=write_vector,
+            )
+            return result.hash_value
+
         rel_hash = self.plugin.metadata_store.add_relation(
             subject=subject,
             predicate=predicate,
@@ -3054,6 +3071,10 @@ class ImportTaskManager:
             confidence=1.0,
         )
         self.plugin.graph_store.add_edges([(subject, obj)], relation_hashes=[rel_hash])
+        try:
+            self.plugin.metadata_store.set_relation_vector_state(rel_hash, "none")
+        except Exception:
+            pass
         return rel_hash
     async def _select_model(self) -> Any:
         models = llm_api.get_available_models()

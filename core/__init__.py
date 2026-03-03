@@ -25,6 +25,7 @@ from .retrieval import (
     DualPathRetrieverConfig,
     TemporalQueryOptions,
     FusionConfig,
+    RelationIntentConfig,
     PersonalizedPageRank,
     PageRankConfig,
     create_ppr_from_graph,
@@ -33,6 +34,10 @@ from .retrieval import (
     ThresholdConfig,
     SparseBM25Index,
     SparseBM25Config,
+)
+from .utils import (
+    RelationWriteService,
+    RelationWriteResult,
 )
 
 __all__ = [
@@ -54,6 +59,7 @@ __all__ = [
     "DualPathRetrieverConfig",
     "TemporalQueryOptions",
     "FusionConfig",
+    "RelationIntentConfig",
     "PersonalizedPageRank",
     "PageRankConfig",
     "create_ppr_from_graph",
@@ -62,5 +68,7 @@ __all__ = [
     "ThresholdConfig",
     "SparseBM25Index",
     "SparseBM25Config",
+    "RelationWriteService",
+    "RelationWriteResult",
 ]
 

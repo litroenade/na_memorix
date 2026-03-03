@@ -50,6 +50,7 @@ from .core import (
     SparseBM25Index,
     SparseBM25Config,
     FusionConfig,
+    RelationWriteService,
 )
 
 logger = get_logger("A_Memorix")
@@ -280,7 +281,7 @@ class A_MemorixPlugin(BasePlugin):
 
     # 插件基本信息（PluginBase要求的抽象属性）
     plugin_name = "A_Memorix"
-    plugin_version = "0.6.1"
+    plugin_version = "0.7.0"
     plugin_description = "轻量级知识库插件 - 含人物画像能力的独立记忆增强系统"
     plugin_author = "A_Dawn"
     enable_plugin = False  # 默认禁用，需要在config.toml中启用
@@ -444,8 +445,29 @@ class A_MemorixPlugin(BasePlugin):
                     "safe_content_dedup": {
                         "enabled": True,
                     },
+                    "relation_intent": {
+                        "enabled": True,
+                        "alpha_override": 0.35,
+                        "relation_candidate_multiplier": 4,
+                        "preserve_top_relations": 3,
+                        "force_relation_sparse": True,
+                        "pair_predicate_rerank_enabled": True,
+                        "pair_predicate_limit": 3,
+                    },
                 },
                 description="统一检索后处理配置（smart fallback / safe dedup）"
+            ),
+            "relation_vectorization": ConfigField(
+                type=dict,
+                default={
+                    "enabled": False,
+                    "write_on_import": True,
+                    "backfill_enabled": False,
+                    "backfill_batch_size": 200,
+                    "backfill_interval_seconds": 5,
+                    "max_retry": 3,
+                },
+                description="关系向量化配置（写入与后台回填）"
             ),
             "time": ConfigField(
                 type=dict,
@@ -753,6 +775,7 @@ class A_MemorixPlugin(BasePlugin):
         self.metadata_store: Optional[MetadataStore] = None
         self.embedding_manager: Optional[EmbeddingAPIAdapter] = None
         self.sparse_index: Optional[SparseBM25Index] = None
+        self.relation_write_service: Optional[RelationWriteService] = None
 
         # 插件配置字典（传递给组件）
         self._plugin_config: dict = {}
@@ -770,6 +793,7 @@ class A_MemorixPlugin(BasePlugin):
         self._auto_save_task: Optional[asyncio.Task] = None
         self._person_profile_refresh_task: Optional[asyncio.Task] = None
         self._memory_maintenance_task: Optional[asyncio.Task] = None
+        self._relation_vector_backfill_task: Optional[asyncio.Task] = None
 
         # 检索请求去重（短 TTL + in-flight 合并）
         self._request_dedup_cache: Dict[str, Dict[str, Any]] = {}
@@ -1255,6 +1279,18 @@ class A_MemorixPlugin(BasePlugin):
         if self._memory_maintenance_task is None or self._memory_maintenance_task.done():
             self._memory_maintenance_task = asyncio.create_task(self._memory_maintenance_loop())
 
+        rv_cfg = self.get_config("retrieval.relation_vectorization", {}) or {}
+        if isinstance(rv_cfg, dict):
+            rv_enabled = bool(rv_cfg.get("enabled", False))
+            rv_backfill = bool(rv_cfg.get("backfill_enabled", False))
+        else:
+            rv_enabled = False
+            rv_backfill = False
+        if rv_enabled and rv_backfill and (
+            self._relation_vector_backfill_task is None or self._relation_vector_backfill_task.done()
+        ):
+            self._relation_vector_backfill_task = asyncio.create_task(self._relation_vector_backfill_loop())
+
     async def _cancel_background_tasks(self):
         """停止后台任务并等待收敛。"""
         tasks = [
@@ -1262,6 +1298,7 @@ class A_MemorixPlugin(BasePlugin):
             ("auto_save", self._auto_save_task),
             ("person_profile_refresh", self._person_profile_refresh_task),
             ("memory_maintenance", self._memory_maintenance_task),
+            ("relation_vector_backfill", self._relation_vector_backfill_task),
         ]
         for _, task in tasks:
             if task and not task.done():
@@ -1281,6 +1318,7 @@ class A_MemorixPlugin(BasePlugin):
         self._auto_save_task = None
         self._person_profile_refresh_task = None
         self._memory_maintenance_task = None
+        self._relation_vector_backfill_task = None
 
     async def on_unload(self):
         """插件卸载时调用"""
@@ -1294,6 +1332,7 @@ class A_MemorixPlugin(BasePlugin):
             "metadata_store": self.metadata_store,
             "embedding_manager": self.embedding_manager,
             "sparse_index": self.sparse_index,
+            "relation_write_service": self.relation_write_service,
             "plugin_instance": self,
         }
         
@@ -1324,6 +1363,7 @@ class A_MemorixPlugin(BasePlugin):
                 "metadata_store": instance.metadata_store,
                 "embedding_manager": instance.embedding_manager,
                 "sparse_index": instance.sparse_index,
+                "relation_write_service": instance.relation_write_service,
             }
             logger.info(f"  从全局实例获取: vector_store={result['vector_store'] is not None}, "
                        f"graph_store={result['graph_store'] is not None}, "
@@ -1346,6 +1386,7 @@ class A_MemorixPlugin(BasePlugin):
                     "metadata_store": getattr(plugin, "metadata_store"),
                     "embedding_manager": getattr(plugin, "embedding_manager"),
                     "sparse_index": getattr(plugin, "sparse_index", None),
+                    "relation_write_service": getattr(plugin, "relation_write_service", None),
                 }
                 logger.info(f"  从 PluginManager 获取: vector_store={result['vector_store'] is not None}, "
                            f"graph_store={result['graph_store'] is not None}, "
@@ -1437,6 +1478,15 @@ class A_MemorixPlugin(BasePlugin):
         self.metadata_store.connect()
         logger.info("元数据存储初始化完成")
 
+        # 初始化统一关系写入服务
+        self.relation_write_service = RelationWriteService(
+            metadata_store=self.metadata_store,
+            graph_store=self.graph_store,
+            vector_store=self.vector_store,
+            embedding_manager=self.embedding_manager,
+        )
+        logger.info("关系写入服务初始化完成")
+
         # 初始化稀疏检索组件（懒加载，不立即装载索引）
         sparse_cfg_raw = self.get_config("retrieval.sparse", {}) or {}
         if not isinstance(sparse_cfg_raw, dict):
@@ -1467,6 +1517,26 @@ class A_MemorixPlugin(BasePlugin):
                 logger.info(f"向量数据已加载，共 {self.vector_store.num_vectors} 个向量")
             except Exception as e:
                 logger.warning(f"加载向量数据失败: {e}")
+
+        # 预热向量索引：将训练/回放前置到启动阶段，避免首个线上请求触发重初始化。
+        try:
+            warmup_summary = self.vector_store.warmup_index(force_train=True)
+            if warmup_summary.get("ok"):
+                logger.info(
+                    "向量索引预热完成: "
+                    f"trained={warmup_summary.get('trained')}, "
+                    f"index_ntotal={warmup_summary.get('index_ntotal')}, "
+                    f"fallback_ntotal={warmup_summary.get('fallback_ntotal')}, "
+                    f"bin_count={warmup_summary.get('bin_count')}, "
+                    f"duration_ms={float(warmup_summary.get('duration_ms', 0.0)):.2f}"
+                )
+            else:
+                logger.warning(
+                    "向量索引预热失败，继续启用 sparse 降级路径: "
+                    f"{warmup_summary.get('error', 'unknown')}"
+                )
+        except Exception as e:
+            logger.warning(f"向量索引预热异常，继续启用 sparse 降级路径: {e}")
 
         if self.graph_store.has_data():
             try:
@@ -1860,6 +1930,171 @@ class A_MemorixPlugin(BasePlugin):
 
         logger.info(f"批量总结任务完成，成功: {success_count}，跳过: {skipped_count}")
 
+    def is_relation_vectorization_enabled(self) -> bool:
+        cfg = self.get_config("retrieval.relation_vectorization", {}) or {}
+        if not isinstance(cfg, dict):
+            return False
+        return bool(cfg.get("enabled", False))
+
+    def should_write_relation_vector_on_import(self) -> bool:
+        cfg = self.get_config("retrieval.relation_vectorization", {}) or {}
+        if not isinstance(cfg, dict):
+            return False
+        return bool(cfg.get("enabled", False)) and bool(cfg.get("write_on_import", True))
+
+    async def _relation_vector_backfill_loop(self):
+        """后台分批回填关系向量。"""
+        logger.info("A_Memorix 关系向量回填任务已启动")
+        try:
+            while True:
+                cfg = self.get_config("retrieval.relation_vectorization", {}) or {}
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                interval_seconds = max(1, int(cfg.get("backfill_interval_seconds", 5)))
+                await asyncio.sleep(interval_seconds)
+
+                if not bool(cfg.get("enabled", False)) or not bool(cfg.get("backfill_enabled", False)):
+                    continue
+                if not self.relation_write_service or not self.metadata_store:
+                    continue
+                self._cleanup_orphan_relation_vectors(limit=200)
+
+                batch_size = max(1, int(cfg.get("backfill_batch_size", 200)))
+                max_retry = max(1, int(cfg.get("max_retry", 3)))
+
+                start = time.perf_counter()
+                rows = self.metadata_store.list_relations_by_vector_state(
+                    states=["none", "failed", "pending"],
+                    limit=batch_size,
+                    max_retry=max_retry,
+                )
+                if not rows:
+                    continue
+
+                success = 0
+                failed = 0
+                skipped = 0
+                for row in rows:
+                    res = await self.relation_write_service.ensure_relation_vector(
+                        hash_value=str(row["hash"]),
+                        subject=str(row.get("subject", "")),
+                        predicate=str(row.get("predicate", "")),
+                        obj=str(row.get("object", "")),
+                    )
+                    if res.vector_state == "ready":
+                        if res.vector_written:
+                            success += 1
+                        else:
+                            skipped += 1
+                    else:
+                        failed += 1
+
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+                state_stats = self.metadata_store.count_relations_by_vector_state()
+                remaining = (
+                    int(state_stats.get("none", 0))
+                    + int(state_stats.get("failed", 0))
+                    + int(state_stats.get("pending", 0))
+                )
+                logger.info(
+                    "metric.relation_backfill_batch_latency=%.2f metric.relation_backfill_batch_latency_ms=%.2f processed=%s success=%s failed=%s skipped=%s remaining=%s",
+                    elapsed_ms,
+                    elapsed_ms,
+                    len(rows),
+                    success,
+                    failed,
+                    skipped,
+                    remaining,
+                )
+        except asyncio.CancelledError:
+            logger.info("关系向量回填任务已取消")
+        except Exception as e:
+            logger.error(f"关系向量回填循环发生错误: {e}")
+
+    def _cleanup_orphan_relation_vectors(self, limit: int = 200) -> int:
+        """清理关系孤儿向量（deleted_relations 存在且 relations 不存在）。"""
+        if not self.metadata_store or not self.vector_store:
+            return 0
+        try:
+            rows = self.metadata_store.query(
+                """
+                SELECT d.hash
+                FROM deleted_relations d
+                LEFT JOIN relations r ON r.hash = d.hash
+                WHERE r.hash IS NULL
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            )
+        except Exception as e:
+            logger.debug(f"孤儿向量清理跳过（查询失败）: {e}")
+            return 0
+        if not rows:
+            return 0
+
+        candidate_hashes = [str(row["hash"]) for row in rows if row.get("hash")]
+        orphan_hashes = [h for h in candidate_hashes if h in self.vector_store]
+        if not orphan_hashes:
+            return 0
+
+        deleted = self.vector_store.delete(orphan_hashes)
+        if deleted > 0:
+            logger.info(
+                "metric.orphan_vector_cleanup_count=%s scanned=%s",
+                deleted,
+                len(candidate_hashes),
+            )
+        return int(deleted)
+
+    def get_relation_vector_stats(self) -> Dict[str, Any]:
+        """返回关系向量状态与覆盖统计。"""
+        if not self.metadata_store:
+            return {}
+
+        state_stats = self.metadata_store.count_relations_by_vector_state()
+        relation_hashes = {str(row["hash"]) for row in self.metadata_store.query("SELECT hash FROM relations")}
+        paragraph_hashes = {
+            str(row["hash"]) for row in self.metadata_store.query("SELECT hash FROM paragraphs")
+        }
+        entity_hashes = {str(row["hash"]) for row in self.metadata_store.query("SELECT hash FROM entities")}
+
+        live_vector_hashes = set()
+        orphan_count = 0
+        relation_vector_hits = 0
+        ready_but_missing_vector = 0
+        if self.vector_store:
+            known_hashes = set(getattr(self.vector_store, "_known_hashes", set()))
+            live_vector_hashes = {h for h in known_hashes if h in self.vector_store}
+            relation_vector_hits = len(relation_hashes & live_vector_hashes)
+            orphan_count = len(live_vector_hashes - relation_hashes - paragraph_hashes - entity_hashes)
+
+            if relation_hashes:
+                ready_rows = self.metadata_store.query(
+                    "SELECT hash FROM relations WHERE COALESCE(vector_state, 'none') = 'ready'"
+                )
+                ready_but_missing_vector = sum(
+                    1 for row in ready_rows if str(row["hash"]) not in live_vector_hashes
+                )
+
+        relation_total = max(0, int(state_stats.get("total", len(relation_hashes))))
+        ready_total = max(0, int(state_stats.get("ready", 0)))
+        ready_coverage = (ready_total / relation_total) if relation_total > 0 else 0.0
+        vector_coverage = (
+            relation_vector_hits / len(relation_hashes)
+            if relation_hashes
+            else 0.0
+        )
+
+        return {
+            "states": state_stats,
+            "orphan_vectors": orphan_count,
+            "relation_total": len(relation_hashes),
+            "relation_vector_hits": relation_vector_hits,
+            "relation_ready_coverage": ready_coverage,
+            "relation_vector_coverage": vector_coverage,
+            "ready_but_missing_vector": ready_but_missing_vector,
+        }
+
     async def save_all(self):
         """统一保存所有数据 (Unified Persistence)"""
         if not self.vector_store or not self.graph_store:
@@ -2149,6 +2384,14 @@ class A_MemorixPlugin(BasePlugin):
                     
                 # 从元数据中备份并删除 (Backup and Delete in Metadata)
                 count = self.metadata_store.backup_and_delete_relations(actually_deleted_hashes)
+                # 同步删除关系向量，避免孤儿向量污染召回
+                if self.vector_store and actually_deleted_hashes:
+                    deleted_vec = self.vector_store.delete(actually_deleted_hashes)
+                    logger.info(
+                        "metric.orphan_vector_cleanup_count=%s prune_hashes=%s",
+                        deleted_vec,
+                        len(actually_deleted_hashes),
+                    )
                 logger.info(f"物理修剪: {count} 条记忆 (已清理映射)")
 
         except Exception as e:

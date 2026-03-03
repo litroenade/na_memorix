@@ -1,6 +1,6 @@
 # A_Memorix
 
-**轻量级知识图谱插件** - 基于双路检索 + 人物画像的独立记忆增强系统 (v0.6.1)
+**轻量级知识图谱插件** - 基于双路检索 + 人物画像的独立记忆增强系统 (v0.7.0)
 
 > 消えていかない感覚 , まだまだ足りてないみたい !
 
@@ -9,16 +9,10 @@
 > 升级后，虽然系统会尝试自动迁移部分数据，但为确保知识图谱的检索精度和完整性，强烈建议在升级后使用 `process_knowledge.py` 脚本重新导入原始文本。
 
 > [!NOTE]
-> **v0.6.1 热修复（WebUI 配置接口序列化兼容）**：
-> 1. 修复 `A_Memorix` 在 WebUI 插件配置接口中的 `tomlkit` 节点序列化问题；
-> 2. 仅影响 `/api/webui/plugins/config/{plugin_id}` 及其 schema 路由；
-> 3. 全局 `/api/webui/config/*` 接口行为保持不变。
-
-> [!NOTE]
-> **v0.6.0 导入能力与WebUI增强**：
-> 1. 新增 Web Import 导入中心（`/import`），支持上传/粘贴/本地扫描/LPMM OpenIE/LPMM转换/时序回填/MaiBot 迁移；
-> 2. 导入状态细化到任务/文件/分块级，支持取消与“失败项重试（分块优先 + 文件回退）”；
-> 3. 导入期间写操作保护、删除后 manifest 同步失效、导入文档弹窗与中文状态展示已对齐。
+> **v0.7.0 中版本升级（关系向量化与运维增强）**：
+> 1. 新增统一关系写入服务 `RelationWriteService`，关系写入支持 `vector_state` 状态机（`none/pending/ready/failed`）；
+> 2. 插件新增关系向量后台回填与统计接口，`/query stats` 与 `knowledge_query stats` 可直接查看覆盖率；
+> 3. 新增 `backfill_relation_vectors.py` 与 `audit_vector_consistency.py`，支持离线回填和一致性审计。
 
 
 ## 📑 文档索引
@@ -36,6 +30,7 @@
 - **⏱️ 时序检索（v0.5.0）** - 支持 `time/hybrid` 模式，按事件时间区间命中并可回退 `created_at`。
 - **👤 人物画像（v0.5.0）** - 支持人物画像快照、别名解析、手工覆盖、按会话 opt-in 注入控制。
 - **📥 Web Import 导入中心（v0.6.0）** - 提供统一导入控制台（`/import`），支持上传/粘贴/路径扫描/LPMM 迁移与任务级可观测。
+- **🧱 关系向量化（v0.7.0）** - 关系写入支持状态机、导入链路按配置写向量、后台可持续回填并输出覆盖率指标。
 - **🧩 稀疏检索增强（FTS5 + BM25）** - embedding 不可用或召回偏弱时自动走 sparse，支持 `jieba/mixed/char_2gram` 分词与 `ngram` 倒排回退。
 - **🧬 生物学记忆 (V5)** - 模拟人类记忆的**衰减 (Decay)**、**强化 (Reinforce)** 与 **结构化重组 (Prune)** 机制，实现记忆的动态生命周期管理。
 - **🔄 智能回退** - 当直接检索结果弱时，自动触发多跳路径搜索，增强间接关系召回。
@@ -162,7 +157,7 @@ python plugins/A_memorix/scripts/convert_lpmm.py -i <lpmm_data_dir> -o <output_d
 **说明：**
 
 - 输入目录支持 `paragraph.parquet`、`entity.parquet` 以及 `rag-graph.graphml/graph.graphml/graph_structure.pkl`。
-- 当前版本优先保证 ID 与元数据一致性，关系向量不做直接导入（避免检索反查不一致）。
+- 当前版本优先保证 ID 与元数据一致性；转换后默认会尝试重建关系向量，可用 `--skip-relation-vector-rebuild` 跳过。
 
 ### 1.3 回填旧数据时序字段 (`backfill_temporal_metadata.py`)
 
@@ -174,6 +169,17 @@ python plugins/A_memorix/scripts/backfill_temporal_metadata.py --limit 50000
 ```
 
 默认回填策略：`event_time=created_at`、`time_granularity=day`、`time_confidence=0.2`。
+
+### 1.4 审计与回填关系向量 (`audit_vector_consistency.py` / `backfill_relation_vectors.py`)  [新增]
+
+当历史数据出现“关系存在但向量缺失”或状态漂移时，可先审计再回填：
+
+```bash
+python plugins/A_memorix/scripts/audit_vector_consistency.py --data-dir plugins/A_memorix/data
+python plugins/A_memorix/scripts/backfill_relation_vectors.py --config plugins/A_memorix/config.toml --data-dir plugins/A_memorix/data --states none,failed,pending
+```
+
+建议流程：先跑审计确认覆盖率与漂移项，再按批次回填，最后再次审计确认结果。
 
 ### 2. 指令交互
 

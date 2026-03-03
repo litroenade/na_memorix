@@ -7,6 +7,7 @@ from .dual_path import (
     DualPathRetrieverConfig,
     TemporalQueryOptions,
     FusionConfig,
+    RelationIntentConfig,
 )
 from .pagerank import (
     PersonalizedPageRank,
@@ -31,6 +32,7 @@ __all__ = [
     "DualPathRetrieverConfig",
     "TemporalQueryOptions",
     "FusionConfig",
+    "RelationIntentConfig",
     # PersonalizedPageRank
     "PersonalizedPageRank",
     "PageRankConfig",
