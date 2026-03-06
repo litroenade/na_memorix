@@ -44,6 +44,37 @@ RAW_DIR = DATA_DIR / "raw"
 PROCESSED_DIR = DATA_DIR / "processed"
 MANIFEST_PATH = DATA_DIR / "import_manifest.json"
 
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="A_Memorix Knowledge Importer (Strategy-Aware)")
+    parser.add_argument("--force", action="store_true", help="Force re-import")
+    parser.add_argument("--clear-manifest", action="store_true", help="Clear manifest")
+    parser.add_argument(
+        "--type",
+        "-t",
+        default="auto",
+        help="Target import strategy override (auto/narrative/factual/quote)",
+    )
+    parser.add_argument("--concurrency", "-c", type=int, default=5)
+    parser.add_argument(
+        "--chat-log",
+        action="store_true",
+        help="聊天记录导入模式：强制 narrative 策略，并使用 LLM 语义抽取 event_time/event_time_range",
+    )
+    parser.add_argument(
+        "--chat-reference-time",
+        default=None,
+        help="chat_log 模式的相对时间参考点（如 2026/02/12 10:30）；不传则使用当前本地时间",
+    )
+    return parser
+
+
+# --help/-h fast path: avoid heavy host/plugin bootstrap
+if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+    _build_arg_parser().print_help()
+    sys.exit(0)
+
+
 try:
     import src
     import plugins
@@ -64,13 +95,20 @@ try:
     VectorStore = core_module.VectorStore
     GraphStore = core_module.GraphStore
     MetadataStore = core_module.MetadataStore
+    ImportStrategy = core_module.ImportStrategy
     create_embedding_api_adapter = core_module.create_embedding_api_adapter
-    KnowledgeType = core_module.KnowledgeType
+    RelationWriteService = getattr(core_module, "RelationWriteService", None)
 
     storage_module = importlib.import_module(f"plugins.{plugin_name}.core.storage")
-    detect_knowledge_type = storage_module.detect_knowledge_type
+    looks_like_quote_text = storage_module.looks_like_quote_text
+    parse_import_strategy = storage_module.parse_import_strategy
+    resolve_stored_knowledge_type = storage_module.resolve_stored_knowledge_type
+    select_import_strategy = storage_module.select_import_strategy
     utils_module = importlib.import_module(f"plugins.{plugin_name}.core.utils")
     normalize_time_meta = utils_module.normalize_time_meta
+    normalize_paragraph_import_item = importlib.import_module(
+        f"plugins.{plugin_name}.core.utils.import_payloads"
+    ).normalize_paragraph_import_item
 
     # Strategies
     strategies_module = importlib.import_module(f"plugins.{plugin_name}.core.strategies")
@@ -103,14 +141,16 @@ class AutoImporter:
         self.graph_store: Optional[GraphStore] = None
         self.metadata_store: Optional[MetadataStore] = None
         self.embedding_manager = None
+        self.relation_write_service = None
         self.plugin_config = {}
         self.manifest = {}
         self.force = force
         self.clear_manifest = clear_manifest
         self.chat_log = chat_log
-        self.target_type = "narrative" if chat_log else target_type
+        parsed_target_type = parse_import_strategy(target_type, default=ImportStrategy.AUTO)
+        self.target_type = ImportStrategy.NARRATIVE.value if chat_log else parsed_target_type.value
         self.chat_reference_dt = self._parse_reference_time(chat_reference_time)
-        if self.chat_log and target_type not in {"auto", "narrative"}:
+        if self.chat_log and parsed_target_type not in {ImportStrategy.AUTO, ImportStrategy.NARRATIVE}:
             logger.warning(
                 f"chat_log 模式已启用，target_type={target_type} 将被覆盖为 narrative"
             )
@@ -166,14 +206,18 @@ class AutoImporter:
         except:
             dim = self.embedding_manager.default_dimension
             
-        q_type_str = self.plugin_config.get("embedding", {}).get("quantization_type", "int8")
+        q_type_str = str(self.plugin_config.get("embedding", {}).get("quantization_type", "int8") or "int8").lower()
         # Need to access QuantizationType from storage_module if not imported globally
         QuantizationType = storage_module.QuantizationType
-        q_map = {"float32": QuantizationType.FLOAT32, "int8": QuantizationType.INT8, "pq": QuantizationType.PQ}
-        
+        if q_type_str != "int8":
+            raise ValueError(
+                "embedding.quantization_type 在 vNext 仅允许 int8(SQ8)。"
+                " 请先执行 scripts/release_vnext_migrate.py migrate。"
+            )
+
         self.vector_store = VectorStore(
             dimension=dim,
-            quantization_type=q_map.get(q_type_str, QuantizationType.INT8),
+            quantization_type=QuantizationType.INT8,
             data_dir=DATA_DIR / "vectors"
         )
         
@@ -188,9 +232,26 @@ class AutoImporter:
         
         self.metadata_store = MetadataStore(data_dir=DATA_DIR / "metadata")
         self.metadata_store.connect()
+
+        if RelationWriteService is not None:
+            self.relation_write_service = RelationWriteService(
+                metadata_store=self.metadata_store,
+                graph_store=self.graph_store,
+                vector_store=self.vector_store,
+                embedding_manager=self.embedding_manager,
+            )
         
         if self.vector_store.has_data(): self.vector_store.load()
         if self.graph_store.has_data(): self.graph_store.load()
+
+    def _should_write_relation_vectors(self) -> bool:
+        retrieval_cfg = self.plugin_config.get("retrieval", {})
+        if not isinstance(retrieval_cfg, dict):
+            return False
+        rv_cfg = retrieval_cfg.get("relation_vectorization", {})
+        if not isinstance(rv_cfg, dict):
+            return False
+        return bool(rv_cfg.get("enabled", False)) and bool(rv_cfg.get("write_on_import", True))
 
     def load_file(self, file_path: Path) -> str:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -300,35 +361,20 @@ Chat paragraph:
 
     def _determine_strategy(self, filename: str, content: str) -> BaseStrategy:
         """Layer 1: Global Strategy Routing"""
+        strategy = select_import_strategy(
+            content,
+            override=self.target_type,
+            chat_log=self.chat_log,
+        )
         if self.chat_log:
             logger.info(f"chat_log 模式: {filename} 强制使用 NarrativeStrategy")
-            return NarrativeStrategy(filename)
+        elif strategy == ImportStrategy.QUOTE:
+            logger.info(f"Auto-detected Quote/Lyric type for {filename}")
 
-        # Manual override
-        if self.target_type == "narrative":
-            return NarrativeStrategy(filename)
-        elif self.target_type == "factual":
+        if strategy == ImportStrategy.FACTUAL:
             return FactualStrategy(filename)
-        
-        # Heuristic based on content
-        # Check first 500 chars
-        head = content[:500]
-        
-        # Quote/Lyric heuristics
-        lines = head.split('\n')
-        avg_line_len = sum(len(l) for l in lines if l.strip()) / (len(lines) + 1e-9)
-        if avg_line_len < 20 and len(lines) > 5:
-            # Short lines -> likely lyrics or poem -> QuoteStrategy
-            # But let's check if the user wanted 'auto'
-            logger.info(f"Auto-detected Quote/Lyric type for {filename} (avg_len={avg_line_len:.1f})")
+        if strategy == ImportStrategy.QUOTE:
             return QuoteStrategy(filename)
-            
-        # Narrative heuristics
-        if "Chapter" in head or "CHAPTER" in head or "###" in head:
-            return NarrativeStrategy(filename)
-            
-        # Default fallback: Narrative (or Mixed later)
-        # For now, let's stick to Narrative as default for 'general text' unless it looks very structured
         return NarrativeStrategy(filename)
 
     def _chunk_rescue(self, chunk: ProcessedChunk, filename: str) -> Optional[BaseStrategy]:
@@ -336,20 +382,11 @@ Chat paragraph:
         # If we are already in Quote strategy, no need to rescue
         if chunk.type == StratKnowledgeType.QUOTE:
             return None
-            
-        text = chunk.chunk.text
-        lines = [l for l in text.split('\n') if l.strip()]
-        if not lines: return None
-        
-        avg_len = sum(len(l) for l in lines) / len(lines)
-        
-        # Rescue: Looks like lyrics embedded in narrative
-        if avg_len < 25 and len(lines) > 4:
-            # Check for repetition or stanza structure?
-            # For now simple avg length heuristic
-            logger.info(f"  > Rescuing chunk {chunk.chunk.index} as Quote (avg_line_len={avg_len:.1f})")
+
+        if looks_like_quote_text(chunk.chunk.text):
+            logger.info(f"  > Rescuing chunk {chunk.chunk.index} as Quote")
             return QuoteStrategy(filename)
-            
+
         return None
 
     async def process_and_import(self):
@@ -476,7 +513,10 @@ Chat paragraph:
         para_item = {
             "content": chunk.chunk.text,
             "source": chunk.source.file,
-            "type": chunk.type.value,
+            "knowledge_type": resolve_stored_knowledge_type(
+                chunk.type.value,
+                content=chunk.chunk.text,
+            ).value,
             "entities": [],
             "relations": []
         }
@@ -596,16 +636,19 @@ Chat paragraph:
         # Same logic, but ensure robust
         with self.graph_store.batch_update():
             for item in data.get("paragraphs", []):
-                content = item.get("content")
-                source = item.get("source", "script")
-                # Type might be passed in item now
-                k_type_val = item.get("type", KnowledgeType.NARRATIVE.value)
-                
+                paragraph = normalize_paragraph_import_item(
+                    item,
+                    default_source="script",
+                )
+                content = paragraph["content"]
+                source = paragraph["source"]
+                k_type_val = paragraph["knowledge_type"]
+
                 h_val = self.metadata_store.add_paragraph(
                     content=content,
                     source=source,
                     knowledge_type=k_type_val,
-                    time_meta=normalize_time_meta(item.get("time_meta")),
+                    time_meta=paragraph["time_meta"],
                 )
                 
                 if h_val not in self.vector_store:
@@ -615,19 +658,44 @@ Chat paragraph:
                     except Exception as e:
                         logger.error(f"  Vector fail: {e}")
 
-                para_entities = item.get("entities", [])
+                para_entities = paragraph["entities"]
                 for entity in para_entities:
                     if entity:
                         await self._add_entity_with_vector(entity, source_paragraph=h_val)
                 
-                para_relations = item.get("relations", [])
+                para_relations = paragraph["relations"]
                 for rel in para_relations:
                     s, p, o = rel.get("subject"), rel.get("predicate"), rel.get("object")
                     if s and p and o:
                         await self._add_entity_with_vector(s, source_paragraph=h_val)
                         await self._add_entity_with_vector(o, source_paragraph=h_val)
-                        rel_hash = self.metadata_store.add_relation(s, p, o, source_paragraph=h_val)
-                        self.graph_store.add_edges([(s, o)], relation_hashes=[rel_hash])
+                        confidence = float(rel.get("confidence", 1.0) or 1.0)
+                        rel_meta = rel.get("metadata", {})
+                        write_vector = self._should_write_relation_vectors()
+                        if self.relation_write_service is not None:
+                            await self.relation_write_service.upsert_relation_with_vector(
+                                subject=s,
+                                predicate=p,
+                                obj=o,
+                                confidence=confidence,
+                                source_paragraph=h_val,
+                                metadata=rel_meta if isinstance(rel_meta, dict) else {},
+                                write_vector=write_vector,
+                            )
+                        else:
+                            rel_hash = self.metadata_store.add_relation(
+                                s,
+                                p,
+                                o,
+                                confidence=confidence,
+                                source_paragraph=h_val,
+                                metadata=rel_meta if isinstance(rel_meta, dict) else {},
+                            )
+                            self.graph_store.add_edges([(s, o)], relation_hashes=[rel_hash])
+                            try:
+                                self.metadata_store.set_relation_vector_state(rel_hash, "none")
+                            except Exception:
+                                pass
                         
                 if progress_callback: progress_callback(1)
     
@@ -639,21 +707,7 @@ Chat paragraph:
             json.dump(self.manifest, f, ensure_ascii=False, indent=2)
 
 async def main():
-    parser = argparse.ArgumentParser(description="A_Memorix Knowledge Importer (Strategy-Aware)")
-    parser.add_argument("--force", action="store_true", help="Force re-import")
-    parser.add_argument("--clear-manifest", action="store_true", help="Clear manifest")
-    parser.add_argument("--type", "-t", default="auto", help="Target type override")
-    parser.add_argument("--concurrency", "-c", type=int, default=5)
-    parser.add_argument(
-        "--chat-log",
-        action="store_true",
-        help="聊天记录导入模式：强制 narrative 策略，并使用 LLM 语义抽取 event_time/event_time_range",
-    )
-    parser.add_argument(
-        "--chat-reference-time",
-        default=None,
-        help="chat_log 模式的相对时间参考点（如 2026/02/12 10:30）；不传则使用当前本地时间",
-    )
+    parser = _build_arg_parser()
     args = parser.parse_args()
 
     if not global_config: return

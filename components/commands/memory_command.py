@@ -14,6 +14,10 @@ from ...core import (
     DualPathRetriever,
     RetrievalStrategy,
     DualPathRetrieverConfig,
+    SparseBM25Config,
+    FusionConfig,
+    GraphRelationRecallConfig,
+    RelationIntentConfig,
 )
 
 logger = get_logger("A_Memorix.MemoryCommand")
@@ -43,6 +47,8 @@ class MemoryMaintenanceCommand(BaseCommand):
         self.vector_store = self.plugin_config.get("vector_store")
         self.graph_store = self.plugin_config.get("graph_store")
         self.metadata_store = self.plugin_config.get("metadata_store")
+        self.relation_write_service = self.plugin_config.get("relation_write_service")
+        self.sparse_index = self.plugin_config.get("sparse_index")
         
         if not all([self.vector_store, self.graph_store, self.metadata_store]):
             from ...plugin import A_MemorixPlugin
@@ -50,6 +56,8 @@ class MemoryMaintenanceCommand(BaseCommand):
             if instances:
                 self.graph_store = self.graph_store or instances.get("graph_store")
                 self.metadata_store = self.metadata_store or instances.get("metadata_store")
+                self.relation_write_service = self.relation_write_service or instances.get("relation_write_service")
+                self.sparse_index = self.sparse_index or instances.get("sparse_index")
         
         self.embedding_manager = self.plugin_config.get("embedding_manager")
         if not self.embedding_manager:
@@ -63,11 +71,51 @@ class MemoryMaintenanceCommand(BaseCommand):
         try:
             if not all([self.vector_store, self.graph_store, self.metadata_store, self.embedding_manager]):
                 return
-                
+
+            sparse_cfg_raw = self.get_config("retrieval.sparse", {}) or {}
+            if not isinstance(sparse_cfg_raw, dict):
+                sparse_cfg_raw = {}
+            fusion_cfg_raw = self.get_config("retrieval.fusion", {}) or {}
+            if not isinstance(fusion_cfg_raw, dict):
+                fusion_cfg_raw = {}
+            graph_recall_cfg_raw = self.get_config("retrieval.search.graph_recall", {}) or {}
+            if not isinstance(graph_recall_cfg_raw, dict):
+                graph_recall_cfg_raw = {}
+            relation_intent_cfg_raw = self.get_config("retrieval.search.relation_intent", {}) or {}
+            if not isinstance(relation_intent_cfg_raw, dict):
+                relation_intent_cfg_raw = {}
+
+            try:
+                sparse_cfg = SparseBM25Config(**sparse_cfg_raw)
+            except Exception:
+                sparse_cfg = SparseBM25Config()
+            try:
+                fusion_cfg = FusionConfig(**fusion_cfg_raw)
+            except Exception:
+                fusion_cfg = FusionConfig()
+            try:
+                graph_recall_cfg = GraphRelationRecallConfig(**graph_recall_cfg_raw)
+            except Exception:
+                graph_recall_cfg = GraphRelationRecallConfig()
+            try:
+                relation_intent_cfg = RelationIntentConfig(**relation_intent_cfg_raw)
+            except Exception:
+                relation_intent_cfg = RelationIntentConfig()
+
             config = DualPathRetrieverConfig(
                 retrieval_strategy=RetrievalStrategy.DUAL_PATH,
+                top_k_paragraphs=self.get_config("retrieval.top_k_paragraphs", 20),
+                top_k_relations=self.get_config("retrieval.top_k_relations", 10),
                 top_k_final=10,
-                enable_ppr=True
+                alpha=self.get_config("retrieval.alpha", 0.5),
+                enable_ppr=bool(self.get_config("retrieval.enable_ppr", True)),
+                ppr_alpha=self.get_config("retrieval.ppr_alpha", 0.85),
+                ppr_concurrency_limit=self.get_config("retrieval.ppr_concurrency_limit", 4),
+                enable_parallel=self.get_config("retrieval.enable_parallel", True),
+                sparse=sparse_cfg,
+                fusion=fusion_cfg,
+                graph_recall=graph_recall_cfg,
+                relation_intent=relation_intent_cfg,
             )
             
             self.retriever = DualPathRetriever(
@@ -75,6 +123,7 @@ class MemoryMaintenanceCommand(BaseCommand):
                 graph_store=self.graph_store,
                 metadata_store=self.metadata_store,
                 embedding_manager=self.embedding_manager,
+                sparse_index=self.sparse_index,
                 config=config,
             )
         except Exception as e:
@@ -127,26 +176,13 @@ class MemoryMaintenanceCommand(BaseCommand):
 
     async def _handle_status(self) -> Tuple[bool, str, int]:
         """查看记忆状态"""
-        cursor = self.metadata_store._conn.cursor()
-        
-        # 1. Active vs Inactive
-        cursor.execute("SELECT COUNT(*) FROM relations WHERE is_inactive = 0")
-        active_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM relations WHERE is_inactive = 1")
-        inactive_count = cursor.fetchone()[0]
-        
-        # 2. Recycle Bin
-        cursor.execute("SELECT COUNT(*) FROM deleted_relations")
-        deleted_count = cursor.fetchone()[0]
-        
-        # 3. Protected
         now = datetime.datetime.now().timestamp()
-        cursor.execute("SELECT COUNT(*) FROM relations WHERE is_pinned = 1")
-        pinned_count = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM relations WHERE protected_until > ?", (now,))
-        temp_protected_count = cursor.fetchone()[0]
+        summary = self.metadata_store.get_memory_status_summary(now)
+        active_count = summary["active_count"]
+        inactive_count = summary["inactive_count"]
+        deleted_count = summary["deleted_count"]
+        pinned_count = summary["pinned_count"]
+        temp_protected_count = summary["temp_protected_count"]
         
         # Get Configs
         mem_conf = self.get_config("memory", {})
@@ -226,17 +262,10 @@ class MemoryMaintenanceCommand(BaseCommand):
         
         revived = []
         reinforced = []
-        
-        # We need u, v to update graph weight
-        cursor = self.metadata_store._conn.cursor()
-        if not hashes:
-            return True, "无须操作", 1
-            
-        ph = ",".join(["?"] * len(hashes))
-        cursor.execute(f"SELECT hash, subject, object FROM relations WHERE hash IN ({ph})", hashes)
-        
-        for row in cursor.fetchall():
-            h, u, v = row
+
+        relation_map = self.metadata_store.get_relations_subject_object_map(hashes)
+        for h, pair in relation_map.items():
+            u, v = pair
             st = status_map.get(h)
             if not st: continue
             
@@ -276,24 +305,15 @@ class MemoryMaintenanceCommand(BaseCommand):
         # Try resolve if not direct hash
         target_hashes = [r_hash]
         if self._is_hash_like(r_hash):
-            # 兼容历史 32 位输入：按前缀匹配到实际 64 位 hash。
-            if len(r_hash) == 32:
-                cursor = self.metadata_store._conn.cursor()
-                cursor.execute(
-                    "SELECT hash FROM deleted_relations WHERE hash LIKE ? LIMIT 5",
-                    (f"{r_hash}%",),
-                )
-                found = [row[0] for row in cursor.fetchall()]
-                if found:
-                    target_hashes = found
+            resolved = self.metadata_store.resolve_relation_hash_alias(
+                r_hash,
+                include_deleted=True,
+            )
+            if resolved:
+                target_hashes = resolved
         else:
             # 非 hash 输入：按内容在回收站检索
-            cursor = self.metadata_store._conn.cursor()
-            cursor.execute(
-                "SELECT hash FROM deleted_relations WHERE subject LIKE ? OR object LIKE ? LIMIT 5", 
-                (f"%{r_hash}%", f"%{r_hash}%")
-            )
-            found = [row[0] for row in cursor.fetchall()]
+            found = self.metadata_store.search_deleted_relation_hashes_by_text(r_hash, limit=5)
             if found:
                 target_hashes = found
             else:
@@ -325,6 +345,23 @@ class MemoryMaintenanceCommand(BaseCommand):
             msg = f"[{subject}]->[{obj}]"
             if not graph_restored:
                 msg += "(仅元数据)"
+            else:
+                rv_cfg = self.get_config("retrieval.relation_vectorization", {}) or {}
+                rv_enabled = bool(rv_cfg.get("enabled", False)) if isinstance(rv_cfg, dict) else False
+                if rv_enabled and self.metadata_store:
+                    has_vector = bool(self.vector_store and h in self.vector_store)
+                    if has_vector:
+                        try:
+                            self.metadata_store.set_relation_vector_state(h, "ready")
+                        except Exception:
+                            pass
+                    else:
+                        # 不阻塞 restore，交给后台回填任务处理
+                        try:
+                            self.metadata_store.set_relation_vector_state(h, "pending")
+                        except Exception:
+                            pass
+                        msg += "(待回填向量)"
             msgs.append(msg)
             restored_count += 1
             
@@ -340,16 +377,9 @@ class MemoryMaintenanceCommand(BaseCommand):
         # 1. If matches hash format (兼容 32/64；优先 64)
         if self._is_hash_like(query):
             query = query.lower()
-            if len(query) == 64:
-                st = self.metadata_store.get_relation_status_batch([query])
-                if st:
-                    return [query]
-            else:
-                cursor = self.metadata_store._conn.cursor()
-                cursor.execute("SELECT hash FROM relations WHERE hash LIKE ? LIMIT 5", (f"{query}%",))
-                hits = [row[0] for row in cursor.fetchall()]
-                if hits:
-                    return hits
+            resolved = self.metadata_store.resolve_relation_hash_alias(query, include_deleted=False)
+            if resolved:
+                return resolved
                 
         # 2. Semantic Search with Retriever
         if self.retriever:
@@ -363,9 +393,7 @@ class MemoryMaintenanceCommand(BaseCommand):
                  return [r.hash_value for r in rel_results[:3]]
                  
         # 3. Fallback to SQL LIKE
-        cursor = self.metadata_store._conn.cursor()
-        cursor.execute("SELECT hash FROM relations WHERE subject LIKE ? OR object LIKE ? LIMIT 5", (f"%{query}%", f"%{query}%"))
-        hashes = [row[0] for row in cursor.fetchall()]
+        hashes = self.metadata_store.search_relation_hashes_by_text(query, limit=5)
         
         return hashes
 

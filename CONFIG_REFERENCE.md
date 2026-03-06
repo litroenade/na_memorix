@@ -1,10 +1,10 @@
 # A_Memorix 配置参数详解（config.toml）
 
-适用版本：`plugins/A_memorix/config.toml`（`config_version = "4.1.0"`，插件代码 `v0.6.1`）。
+适用版本：`plugins/A_memorix/config.toml`（`config_version = "4.1.0"`，插件代码 `v1.0.0`）。
 
 ---
 
-## ⚠️ 先看这 6 条
+## ⚠️ 先看这 8 条
 
 - `embedding.quantization_type` 当前**基本不生效**：虽然配置支持 `float32/int8/pq`，但 `VectorStore` 内部目前固定走 SQ8（`int8`）实现（后期预期不会走其他实现）。
 - `retrieval.sparse` 与 `retrieval.fusion` 是新增检索增强配置：可在 embedding 异常时自动回退 BM25，并通过 weighted RRF 融合候选。
@@ -13,6 +13,7 @@
 - `filter.chats = []` 时采用安全兜底：`whitelist`=全部拒绝，`blacklist`=全部放行。
 - `retrieval.sparse.enable_relation_sparse_fallback = false` 会关闭关系 sparse 召回，但当前段落 sparse 查询路径仍会幂等检查 `relations_fts` schema/backfill（有轻微额外开销）。
 - `web.import.*` 新增导入中心运行配置（并发、队列、Token、路径别名、转换策略）；如未配置将使用插件默认值。
+- `retrieval.relation_vectorization` 控制关系向量写入与后台回填；插件代码默认 `enabled=false`，建议先灰度启用再全量开启。
 
 ---
 
@@ -101,6 +102,34 @@
 - `retrieval.search.safe_content_dedup.enabled`
   - 功能：统一链路结果安全去重开关。
   - 生效：按 hash/内容相似度去重，并保证至少保留一条结果。
+
+### `[retrieval.relation_vectorization]` 关系向量化
+
+- `retrieval.relation_vectorization.enabled`
+  - 功能：关系向量化总开关。
+  - 生效：关闭时导入链路不写关系向量，后台回填循环也不会启动。
+- `retrieval.relation_vectorization.write_on_import`
+  - 功能：导入写关系时是否立即写向量。
+  - 生效：作用于 `/import`、`process_knowledge.py`、`summary_importer`、`migrate_maibot_memory.py` 等写入路径。
+- `retrieval.relation_vectorization.backfill_enabled`
+  - 功能：是否开启插件内置关系向量后台回填任务。
+  - 生效：`on_enable` 后按间隔扫描 `none/failed/pending` 状态并尝试补齐向量。
+- `retrieval.relation_vectorization.backfill_batch_size`
+  - 功能：单轮后台回填处理批大小。
+  - 生效：每轮回填最多处理该数量关系，避免单次占用过高。
+- `retrieval.relation_vectorization.backfill_interval_seconds`
+  - 功能：后台回填轮询间隔（秒）。
+  - 生效：控制回填任务节奏与资源占用。
+- `retrieval.relation_vectorization.max_retry`
+  - 功能：失败关系回填最大重试次数。
+  - 生效：超过次数后不再进入常规回填候选，需人工审计后处理。
+
+### 关系向量化运维脚本
+
+- `scripts/audit_vector_consistency.py`
+  - 用途：审计 paragraph/entity/relation 覆盖率、relation `vector_state` 分布、孤儿向量与状态漂移。
+- `scripts/backfill_relation_vectors.py`
+  - 用途：离线批量回填 `none/failed/pending` 关系向量；支持并发、重试与 `ready but missing` 漂移修复。
 
 ### `[retrieval.sparse]` 稀疏检索（FTS5 + BM25）
 
@@ -374,7 +403,8 @@
   - 生效：构造总结 prompt 时决定是否拼接 personality 文本。
 - `summarization.default_knowledge_type`
   - 功能：总结入库时默认知识类型。
-  - 生效：写入段落时转换为 `KnowledgeType`（无法识别时回退 `narrative`）。
+  - 允许值：`narrative`、`factual`、`quote`、`structured`、`mixed`。
+  - 生效：写入段落时转换为合法落库 `KnowledgeType`。
 
 ## `[schedule]` 定时任务
 

@@ -5,8 +5,12 @@ from .storage import (
     VectorStore, 
     GraphStore, 
     MetadataStore,
+    ImportStrategy,
     KnowledgeType,
+    parse_import_strategy,
+    resolve_stored_knowledge_type,
     detect_knowledge_type,
+    select_import_strategy,
     should_extract_relations,
     get_type_display_name,
 )
@@ -25,6 +29,8 @@ from .retrieval import (
     DualPathRetrieverConfig,
     TemporalQueryOptions,
     FusionConfig,
+    GraphRelationRecallConfig,
+    RelationIntentConfig,
     PersonalizedPageRank,
     PageRankConfig,
     create_ppr_from_graph,
@@ -34,14 +40,22 @@ from .retrieval import (
     SparseBM25Index,
     SparseBM25Config,
 )
+from .utils import (
+    RelationWriteService,
+    RelationWriteResult,
+)
 
 __all__ = [
     # Storage
     "VectorStore",
     "GraphStore",
     "MetadataStore",
+    "ImportStrategy",
     "KnowledgeType",
+    "parse_import_strategy",
+    "resolve_stored_knowledge_type",
     "detect_knowledge_type",
+    "select_import_strategy",
     "should_extract_relations",
     "get_type_display_name",
     # Embedding
@@ -54,6 +68,8 @@ __all__ = [
     "DualPathRetrieverConfig",
     "TemporalQueryOptions",
     "FusionConfig",
+    "GraphRelationRecallConfig",
+    "RelationIntentConfig",
     "PersonalizedPageRank",
     "PageRankConfig",
     "create_ppr_from_graph",
@@ -62,5 +78,7 @@ __all__ = [
     "ThresholdConfig",
     "SparseBM25Index",
     "SparseBM25Config",
+    "RelationWriteService",
+    "RelationWriteResult",
 ]
 

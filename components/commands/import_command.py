@@ -24,11 +24,17 @@ from ...core import (
     MetadataStore,
     EmbeddingAPIAdapter,
     KnowledgeType,
-    detect_knowledge_type,
+    resolve_stored_knowledge_type,
+    select_import_strategy,
     should_extract_relations,
     get_type_display_name,
 )
-from ...core.utils.time_parser import normalize_time_meta
+from ...core.utils.relation_write_service import RelationWriteService
+from ...core.utils.import_payloads import normalize_paragraph_import_item
+from ...core.utils.runtime_self_check import (
+    ensure_runtime_self_check,
+    run_embedding_runtime_self_check,
+)
 
 logger = get_logger("A_Memorix.ImportCommand")
 
@@ -61,6 +67,7 @@ class ImportCommand(BaseCommand):
         self.graph_store: Optional[GraphStore] = self.plugin_config.get("graph_store")
         self.metadata_store: Optional[MetadataStore] = self.plugin_config.get("metadata_store")
         self.embedding_manager: Optional[EmbeddingAPIAdapter] = self.plugin_config.get("embedding_manager")
+        self.relation_write_service: Optional[RelationWriteService] = self.plugin_config.get("relation_write_service")
 
         # 兜底逻辑：如果配置中没有存储实例，尝试直接从插件系统获取
         # 使用 is not None 检查，因为空对象可能布尔值为 False
@@ -77,6 +84,7 @@ class ImportCommand(BaseCommand):
                 self.graph_store = self.graph_store or instances.get("graph_store")
                 self.metadata_store = self.metadata_store or instances.get("metadata_store")
                 self.embedding_manager = self.embedding_manager or instances.get("embedding_manager")
+                self.relation_write_service = self.relation_write_service or instances.get("relation_write_service")
 
         # 设置日志前缀
         if self.message and self.message.chat_stream:
@@ -110,6 +118,11 @@ class ImportCommand(BaseCommand):
             error_msg = "❌ 知识库未初始化，无法导入"
             logger.error(f"{self.log_prefix} {error_msg}")
             return False, error_msg, 0
+
+        self_check_ok, self_check_msg = await self._ensure_runtime_self_check()
+        if not self_check_ok:
+            logger.error(f"{self.log_prefix} 导入前自检失败: {self_check_msg}")
+            return False, f"❌ 导入前自检失败: {self_check_msg}", 0
 
         # 获取匹配的参数: 如果 mode 未捕获(None)，则默认为 "text"
         mode = self.matched_groups.get("mode") or "text"
@@ -153,6 +166,29 @@ class ImportCommand(BaseCommand):
             error_msg = f"❌ 导入失败: {str(e)}"
             logger.error(f"{self.log_prefix} {error_msg}")
             return False, error_msg, 0
+
+    async def _ensure_runtime_self_check(self) -> Tuple[bool, str]:
+        plugin_instance = self.plugin_config.get("plugin_instance")
+        if plugin_instance is not None:
+            report = await ensure_runtime_self_check(plugin_instance)
+        else:
+            report = await run_embedding_runtime_self_check(
+                config=self.plugin_config,
+                vector_store=self.vector_store,
+                embedding_manager=self.embedding_manager,
+            )
+
+        if bool(report.get("ok", False)):
+            return True, ""
+
+        return (
+            False,
+            f"{report.get('message', 'unknown')} "
+            f"(configured={report.get('configured_dimension', 0)}, "
+            f"store={report.get('vector_store_dimension', 0)}, "
+            f"encoded={report.get('encoded_dimension', 0)})。"
+            "请先执行 python plugins/A_memorix/scripts/runtime_self_check.py --json",
+        )
 
     async def _import_text(self, text: str) -> Tuple[bool, str]:
         """导入文本（自动分段和提取）
@@ -344,26 +380,28 @@ class ImportCommand(BaseCommand):
             # 导入段落（支持 time_meta 透传）
             paragraphs = data.get("paragraphs", [])
             for p in paragraphs:
-                if isinstance(p, str):
-                    await self._add_paragraph(p)
-                    p_count += 1
-                    continue
-
-                if isinstance(p, dict) and "content" in p:
-                    raw_time_meta = {
-                        "event_time": p.get("event_time"),
-                        "event_time_start": p.get("event_time_start"),
-                        "event_time_end": p.get("event_time_end"),
-                        "time_range": p.get("time_range"),
-                        "time_granularity": p.get("time_granularity"),
-                        "time_confidence": p.get("time_confidence"),
-                    }
-                    time_meta = normalize_time_meta(raw_time_meta)
-                    await self._add_paragraph(
-                        p["content"],
-                        time_meta=time_meta if time_meta else None,
+                paragraph = normalize_paragraph_import_item(
+                    p,
+                    default_source="import_command",
+                )
+                para_hash, _ = await self._add_paragraph(
+                    paragraph["content"],
+                    knowledge_type=resolve_stored_knowledge_type(paragraph["knowledge_type"]),
+                    time_meta=paragraph["time_meta"],
+                    source=paragraph["source"],
+                )
+                for entity in paragraph["entities"]:
+                    await self._add_entity_with_vector(entity, source_paragraph=para_hash)
+                    e_count += 1
+                for rel in paragraph["relations"]:
+                    await self._add_relation(
+                        rel["subject"],
+                        rel["predicate"],
+                        rel["object"],
+                        source_paragraph=para_hash,
                     )
-                    p_count += 1
+                    r_count += 1
+                p_count += 1
 
             # 导入实体
             entities = data.get("entities", [])
@@ -430,6 +468,7 @@ class ImportCommand(BaseCommand):
         content: str,
         knowledge_type: Optional[KnowledgeType] = None,
         time_meta: Optional[Dict[str, Any]] = None,
+        source: Optional[str] = None,
     ) -> Tuple[str, KnowledgeType]:
         """添加段落到知识库
 
@@ -441,8 +480,9 @@ class ImportCommand(BaseCommand):
             元组：(段落hash值, 检测到的知识类型)
         """
         # 自动检测知识类型
-        if knowledge_type is None or knowledge_type == KnowledgeType.AUTO:
-            knowledge_type = detect_knowledge_type(content)
+        if knowledge_type is None:
+            import_strategy = select_import_strategy(content)
+            knowledge_type = resolve_stored_knowledge_type(import_strategy, content=content)
         
         if self.debug_enabled:
             logger.info(
@@ -452,7 +492,7 @@ class ImportCommand(BaseCommand):
         # 添加到metadata store
         hash_value = self.metadata_store.add_paragraph(
             content=content,
-            source="import_command",
+            source=source or "import_command",
             knowledge_type=knowledge_type.value,
             time_meta=time_meta,
         )
@@ -494,8 +534,27 @@ class ImportCommand(BaseCommand):
             关系hash值
         """
         # 添加实体到图 (并向量化)
-        await self._add_entity_with_vector(subject)
-        await self._add_entity_with_vector(obj)
+        await self._add_entity_with_vector(subject, source_paragraph=source_paragraph)
+        await self._add_entity_with_vector(obj, source_paragraph=source_paragraph)
+
+        rv_enabled = bool(self.get_config("retrieval.relation_vectorization.enabled", False))
+        write_on_import = bool(self.get_config("retrieval.relation_vectorization.write_on_import", True))
+        write_vector = rv_enabled and write_on_import
+
+        if self.relation_write_service is not None:
+            result = await self.relation_write_service.upsert_relation_with_vector(
+                subject=subject,
+                predicate=predicate,
+                obj=obj,
+                confidence=confidence,
+                source_paragraph=source_paragraph,
+                write_vector=write_vector,
+            )
+            logger.debug(
+                f"{self.log_prefix} 添加关系: {subject} {predicate} {obj}, "
+                f"hash={result.hash_value[:16]}..., vector_state={result.vector_state}"
+            )
+            return result.hash_value
 
         # 添加关系到metadata store
         hash_value = self.metadata_store.add_relation(
@@ -508,6 +567,10 @@ class ImportCommand(BaseCommand):
 
         # 添加关系到图（写入 relation_hashes，确保删除/修剪可精确回溯）
         self.graph_store.add_edges([(subject, obj)], relation_hashes=[hash_value])
+        try:
+            self.metadata_store.set_relation_vector_state(hash_value, "none")
+        except Exception:
+            pass
 
         logger.debug(
             f"{self.log_prefix} 添加关系: {subject} {predicate} {obj}, "

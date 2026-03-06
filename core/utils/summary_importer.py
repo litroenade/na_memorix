@@ -18,13 +18,15 @@ from src.config.config import global_config, model_config as host_model_config
 from src.config.api_ada_configs import TaskConfig
 
 from ..storage import (
+    KnowledgeType,
     VectorStore,
     GraphStore,
     MetadataStore,
-    KnowledgeType,
-    get_knowledge_type_from_string
+    resolve_stored_knowledge_type,
 )
 from ..embedding import EmbeddingAPIAdapter
+from .relation_write_service import RelationWriteService
+from .runtime_self_check import ensure_runtime_self_check, run_embedding_runtime_self_check
 
 logger = get_logger("A_Memorix.SummaryImporter")
 
@@ -68,26 +70,23 @@ class SummaryImporter:
         self.metadata_store = metadata_store
         self.embedding_manager = embedding_manager
         self.plugin_config = plugin_config
+        self.relation_write_service: Optional[RelationWriteService] = (
+            plugin_config.get("relation_write_service")
+            if isinstance(plugin_config, dict)
+            else None
+        )
 
     def _normalize_summary_model_selectors(self, raw_value: Any) -> List[str]:
-        """标准化 summarization.model_name 配置，兼容字符串和字符串数组。"""
+        """标准化 summarization.model_name 配置（vNext 仅接受字符串数组）。"""
         if raw_value is None:
             return ["auto"]
-        if isinstance(raw_value, str):
-            v = raw_value.strip()
-            if not v:
-                return ["auto"]
-            # 兼容写法: "utils:model1","utils:model2",replyer
-            if "," in v:
-                parts = [part.strip().strip("'\"") for part in v.split(",")]
-                selectors = [part for part in parts if part]
-                return selectors or ["auto"]
-            return [v]
         if isinstance(raw_value, list):
             selectors = [str(x).strip() for x in raw_value if str(x).strip()]
             return selectors or ["auto"]
-        v = str(raw_value).strip()
-        return [v] if v else ["auto"]
+        raise ValueError(
+            "summarization.model_name 在 vNext 必须为 List[str]。"
+            " 请执行 scripts/release_vnext_migrate.py migrate。"
+        )
 
     def _pick_default_summary_task(self, available_tasks: Dict[str, TaskConfig]) -> Tuple[Optional[str], Optional[TaskConfig]]:
         """
@@ -224,6 +223,10 @@ class SummaryImporter:
             Tuple[bool, str]: (是否成功, 结果消息)
         """
         try:
+            self_check_ok, self_check_msg = await self._ensure_runtime_self_check()
+            if not self_check_ok:
+                return False, f"导入前自检失败: {self_check_msg}"
+
             # 1. 获取配置
             if context_length is None:
                 context_length = self.plugin_config.get("summarization", {}).get("context_length", 50)
@@ -318,6 +321,26 @@ class SummaryImporter:
             logger.error(f"总结导入过程中出错: {e}", exc_info=True)
             return False, f"错误: {str(e)}"
 
+    async def _ensure_runtime_self_check(self) -> Tuple[bool, str]:
+        plugin_instance = self.plugin_config.get("plugin_instance") if isinstance(self.plugin_config, dict) else None
+        if plugin_instance is not None:
+            report = await ensure_runtime_self_check(plugin_instance)
+        else:
+            report = await run_embedding_runtime_self_check(
+                config=self.plugin_config,
+                vector_store=self.vector_store,
+                embedding_manager=self.embedding_manager,
+            )
+        if bool(report.get("ok", False)):
+            return True, ""
+        return (
+            False,
+            f"{report.get('message', 'unknown')} "
+            f"(configured={report.get('configured_dimension', 0)}, "
+            f"store={report.get('vector_store_dimension', 0)}, "
+            f"encoded={report.get('encoded_dimension', 0)})",
+        )
+
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
         """解析 LLM 返回的 JSON"""
         try:
@@ -341,7 +364,11 @@ class SummaryImporter:
         """将数据写入存储"""
         # 获取默认知识类型
         type_str = self.plugin_config.get("summarization", {}).get("default_knowledge_type", "narrative")
-        knowledge_type = get_knowledge_type_from_string(type_str) or KnowledgeType.NARRATIVE
+        try:
+            knowledge_type = resolve_stored_knowledge_type(type_str, content=summary)
+        except ValueError:
+            logger.warning(f"非法 summarization.default_knowledge_type={type_str}，回退 narrative")
+            knowledge_type = KnowledgeType.NARRATIVE
 
         # 导入总结文本
         hash_value = self.metadata_store.add_paragraph(
@@ -362,18 +389,36 @@ class SummaryImporter:
             self.graph_store.add_nodes(entities)
 
         # 导入关系
+        rv_cfg = self.plugin_config.get("retrieval", {}).get("relation_vectorization", {})
+        if not isinstance(rv_cfg, dict):
+            rv_cfg = {}
+        write_vector = bool(rv_cfg.get("enabled", False)) and bool(rv_cfg.get("write_on_import", True))
         for rel in relations:
             s, p, o = rel.get("subject"), rel.get("predicate"), rel.get("object")
             if all([s, p, o]):
-                # 写入元数据
-                rel_hash = self.metadata_store.add_relation(
-                    subject=s,
-                    predicate=p,
-                    obj=o,
-                    confidence=1.0,
-                    source_paragraph=summary
-                )
-                # 写入图数据库（写入 relation_hashes，确保后续可按关系精确修剪）
-                self.graph_store.add_edges([(s, o)], relation_hashes=[rel_hash])
+                if self.relation_write_service is not None:
+                    await self.relation_write_service.upsert_relation_with_vector(
+                        subject=s,
+                        predicate=p,
+                        obj=o,
+                        confidence=1.0,
+                        source_paragraph=summary,
+                        write_vector=write_vector,
+                    )
+                else:
+                    # 写入元数据
+                    rel_hash = self.metadata_store.add_relation(
+                        subject=s,
+                        predicate=p,
+                        obj=o,
+                        confidence=1.0,
+                        source_paragraph=summary
+                    )
+                    # 写入图数据库（写入 relation_hashes，确保后续可按关系精确修剪）
+                    self.graph_store.add_edges([(s, o)], relation_hashes=[rel_hash])
+                    try:
+                        self.metadata_store.set_relation_vector_state(rel_hash, "none")
+                    except Exception:
+                        pass
                 
         logger.info(f"总结导入完成: hash={hash_value[:8]}")
