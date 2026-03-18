@@ -9,7 +9,11 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import or_
+from sqlmodel import select
+
 from src.common.logger import get_logger
+from src.common.database.database import get_db_session
 from src.common.database.database_model import PersonInfo
 
 from ..embedding import EmbeddingAPIAdapter
@@ -120,30 +124,39 @@ class PersonProfileService:
         if not key:
             return ""
 
+        try:
+            with get_db_session(auto_commit=False) as session:
+                record = session.exec(
+                    select(PersonInfo.person_id).where(PersonInfo.person_id == key).limit(1)
+                ).first()
+                if record:
+                    return str(record)
+
+                record = session.exec(
+                    select(PersonInfo.person_id)
+                    .where(
+                        or_(
+                            PersonInfo.person_name == key,
+                            PersonInfo.user_nickname == key,
+                        )
+                    )
+                    .limit(1)
+                ).first()
+                if record:
+                    return str(record)
+
+                record = session.exec(
+                    select(PersonInfo.person_id)
+                    .where(PersonInfo.group_cardname.contains(key))
+                    .limit(1)
+                ).first()
+                if record:
+                    return str(record)
+        except Exception as e:
+            logger.warning(f"按别名解析 person_id 失败: identifier={key}, err={e}")
+
         if len(key) == 32 and all(ch in "0123456789abcdefABCDEF" for ch in key):
             return key.lower()
-
-        try:
-            record = (
-                PersonInfo.select(PersonInfo.person_id)
-                .where((PersonInfo.person_name == key) | (PersonInfo.nickname == key))
-                .first()
-            )
-            if record and record.person_id:
-                return str(record.person_id)
-        except Exception:
-            pass
-
-        try:
-            record = (
-                PersonInfo.select(PersonInfo.person_id)
-                .where(PersonInfo.group_nick_name.contains(key))
-                .first()
-            )
-            if record and record.person_id:
-                return str(record.person_id)
-        except Exception:
-            pass
 
         return ""
 
@@ -160,7 +173,7 @@ class PersonProfileService:
         names: List[str] = []
         for item in items:
             if isinstance(item, dict):
-                value = str(item.get("group_nick_name", "")).strip()
+                value = str(item.get("group_cardname") or item.get("group_nick_name") or "").strip()
                 if value:
                     names.append(value)
             elif isinstance(item, str):
@@ -193,6 +206,42 @@ class PersonProfileService:
             traits.append(text)
         return traits[:10]
 
+    def _recover_aliases_from_memory(self, person_id: str) -> Tuple[List[str], str]:
+        """当人物主档案缺失时，从已有记忆证据里回捞可用别名。"""
+        if not person_id:
+            return [], ""
+
+        aliases: List[str] = []
+        primary_name = ""
+        seen = set()
+
+        try:
+            paragraphs = self.metadata_store.get_paragraphs_by_entity(person_id)
+        except Exception as e:
+            logger.warning(f"从记忆证据回捞人物别名失败: person_id={person_id}, err={e}")
+            return [], ""
+
+        for paragraph in paragraphs[:20]:
+            paragraph_hash = str(paragraph.get("hash", "") or "").strip()
+            if not paragraph_hash:
+                continue
+            try:
+                paragraph_entities = self.metadata_store.get_paragraph_entities(paragraph_hash)
+            except Exception:
+                paragraph_entities = []
+            for entity in paragraph_entities:
+                name = str(entity.get("name", "") or "").strip()
+                if not name or name == person_id:
+                    continue
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                aliases.append(name)
+                if not primary_name:
+                    primary_name = name
+        return aliases, primary_name
+
     def get_person_aliases(self, person_id: str) -> Tuple[List[str], str, List[str]]:
         """获取人物别名集合、主展示名、记忆特征。"""
         aliases: List[str] = []
@@ -200,18 +249,28 @@ class PersonProfileService:
         memory_traits: List[str] = []
         if not person_id:
             return aliases, primary_name, memory_traits
+        recovered_aliases, recovered_primary_name = self._recover_aliases_from_memory(person_id)
         try:
-            record = PersonInfo.get_or_none(PersonInfo.person_id == person_id)
-            if not record:
-                return aliases, primary_name, memory_traits
+            with get_db_session(auto_commit=False) as session:
+                record = session.exec(
+                    select(PersonInfo).where(PersonInfo.person_id == person_id).limit(1)
+                ).first()
+                if not record:
+                    return recovered_aliases, recovered_primary_name or person_id, memory_traits
             person_name = str(getattr(record, "person_name", "") or "").strip()
-            nickname = str(getattr(record, "nickname", "") or "").strip()
-            group_nicks = self._parse_group_nicks(getattr(record, "group_nick_name", None))
+            nickname = str(getattr(record, "user_nickname", "") or "").strip()
+            group_nicks = self._parse_group_nicks(getattr(record, "group_cardname", None))
             memory_traits = self._parse_memory_traits(getattr(record, "memory_points", None))
 
-            primary_name = person_name or nickname or str(getattr(record, "user_id", "") or "").strip() or person_id
+            primary_name = (
+                person_name
+                or nickname
+                or recovered_primary_name
+                or str(getattr(record, "user_id", "") or "").strip()
+                or person_id
+            )
 
-            candidates = [person_name, nickname] + group_nicks
+            candidates = [person_name, nickname] + group_nicks + recovered_aliases
             seen = set()
             for item in candidates:
                 norm = str(item or "").strip()

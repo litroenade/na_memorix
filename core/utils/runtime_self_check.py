@@ -61,6 +61,29 @@ def _build_report(
     }
 
 
+def _normalize_encoded_vector(encoded: Any) -> np.ndarray:
+    if encoded is None:
+        raise ValueError("embedding encode returned None")
+
+    if isinstance(encoded, np.ndarray):
+        array = encoded
+    else:
+        array = np.asarray(encoded, dtype=np.float32)
+
+    if array.ndim == 2:
+        if array.shape[0] != 1:
+            raise ValueError(f"embedding encode returned batched output: shape={tuple(array.shape)}")
+        array = array[0]
+
+    if array.ndim != 1:
+        raise ValueError(f"embedding encode returned invalid ndim={array.ndim}")
+    if array.size <= 0:
+        raise ValueError("embedding encode returned empty vector")
+    if not np.all(np.isfinite(array)):
+        raise ValueError("embedding encode returned non-finite values")
+    return array.astype(np.float32, copy=False)
+
+
 async def run_embedding_runtime_self_check(
     *,
     config: Any,
@@ -91,13 +114,11 @@ async def run_embedding_runtime_self_check(
     try:
         detected_dimension = _safe_int(await embedding_manager._detect_dimension(), 0)
         encoded = await embedding_manager.encode(sample_text)
-        if isinstance(encoded, np.ndarray):
-            encoded_dimension = int(encoded.shape[0]) if encoded.ndim == 1 else int(encoded.shape[-1])
-        else:
-            encoded_dimension = len(encoded) if encoded is not None else 0
+        encoded_array = _normalize_encoded_vector(encoded)
+        encoded_dimension = int(encoded_array.shape[0])
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        logger.warning("embedding runtime self-check failed: %s", exc)
+        logger.warning(f"embedding runtime self-check failed: {exc}")
         return _build_report(
             ok=False,
             code="embedding_probe_failed",

@@ -384,10 +384,10 @@ class EpisodeService:
                 raise ValueError("llm_empty_episodes")
         except Exception as e:
             logger.warning(
-                "Episode segmentation fallback: source=%s size=%s err=%s",
-                source,
-                len(group_hashes),
-                e,
+                "Episode segmentation fallback: "
+                f"source={source} "
+                f"size={len(group_hashes)} "
+                f"err={e}"
             )
             episodes = [self._build_fallback_episode(group)]
             fallback_used = True

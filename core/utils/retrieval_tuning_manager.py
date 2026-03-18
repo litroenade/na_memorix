@@ -18,11 +18,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.common.logger import get_logger
 
-from ..runtime import build_search_runtime
+from ..runtime.search_runtime_initializer import build_search_runtime
 from .search_execution_service import SearchExecutionRequest, SearchExecutionService
 
 try:
-    from src.plugin_system.apis import llm_api
+    from src.services import llm_service as llm_api
 except Exception:  # pragma: no cover
     llm_api = None
 

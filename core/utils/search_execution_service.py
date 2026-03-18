@@ -92,9 +92,9 @@ class SearchExecutionService:
                 return plugin_instance
 
         try:
-            from ...plugin import A_MemorixPlugin
+            from ...plugin import AMemorixPlugin
 
-            return A_MemorixPlugin.get_global_instance()
+            return getattr(AMemorixPlugin, "get_global_instance", lambda: None)()
         except Exception:
             return None
 
@@ -261,9 +261,9 @@ class SearchExecutionService:
                 user_id=request.user_id,
             ):
                 logger.info(
-                    "检索请求被聊天过滤拦截: caller=%s, stream_id=%s",
-                    request.caller,
-                    request.stream_id,
+                    "检索请求被聊天过滤拦截: "
+                    f"caller={request.caller}, "
+                    f"stream_id={request.stream_id}"
                 )
                 return SearchExecutionResult(
                     success=True,
@@ -360,9 +360,9 @@ class SearchExecutionService:
                     )
                     if fallback_triggered:
                         logger.info(
-                            "metric.smart_fallback_triggered_count=1 caller=%s added=%s",
-                            request.caller,
-                            fallback_added,
+                            "metric.smart_fallback_triggered_count=1 "
+                            f"caller={request.caller} "
+                            f"added={fallback_added}"
                         )
 
                 dedup_enabled = bool(
@@ -376,9 +376,8 @@ class SearchExecutionService:
                     retrieved, removed_count = apply_safe_content_dedup(list(retrieved))
                     if removed_count > 0:
                         logger.info(
-                            "metric.safe_dedup_removed_count=%s caller=%s",
-                            removed_count,
-                            request.caller,
+                            f"metric.safe_dedup_removed_count={removed_count} "
+                            f"caller={request.caller}"
                         )
 
                 elapsed_ms = (time.time() - started_at) * 1000.0
@@ -406,7 +405,7 @@ class SearchExecutionService:
             return SearchExecutionResult(success=False, error=f"知识检索失败: {e}")
 
         if dedup_hit:
-            logger.info("metric.search_execution_dedup_hit_count=1 caller=%s", request.caller)
+            logger.info(f"metric.search_execution_dedup_hit_count=1 caller={request.caller}")
 
         return SearchExecutionResult(
             success=True,

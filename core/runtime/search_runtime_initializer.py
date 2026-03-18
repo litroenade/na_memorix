@@ -93,9 +93,9 @@ def _resolve_runtime_components(plugin_config: Optional[dict]) -> SearchRuntimeB
         return bundle
 
     try:
-        from ...plugin import A_MemorixPlugin
+        from ...plugin import AMemorixPlugin
 
-        instances = A_MemorixPlugin.get_storage_instances()
+        instances = AMemorixPlugin.get_storage_instances()
     except Exception:
         instances = {}
 

@@ -22,6 +22,7 @@ import pickle
 import sqlite3
 import sys
 import time
+import traceback
 import types
 from collections import defaultdict
 from dataclasses import dataclass
@@ -35,7 +36,8 @@ import tomlkit
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = CURRENT_DIR.parent
-PROJECT_ROOT = PLUGIN_ROOT.parent.parent
+WORKSPACE_ROOT = PLUGIN_ROOT.parent
+MAIBOT_ROOT = WORKSPACE_ROOT / "MaiBot"
 RUNTIME_CORE_PACKAGE = "_a_memorix_runtime_core"
 
 VectorStore = None
@@ -52,17 +54,30 @@ model_config = None
 RelationWriteService = None
 
 
-logger = logging.getLogger("A_Memorix.MaiBotMigration")
-logger.addHandler(logging.NullHandler())
+def _create_bootstrap_logger():
+    fallback = logging.getLogger("A_Memorix.MaiBotMigration")
+    if not fallback.handlers:
+        fallback.addHandler(logging.NullHandler())
+    try:
+        for path in (WORKSPACE_ROOT, MAIBOT_ROOT, PLUGIN_ROOT):
+            path_str = str(path)
+            if path_str not in sys.path:
+                sys.path.insert(0, path_str)
+        from src.common.logger import get_logger
+
+        return get_logger("A_Memorix.MaiBotMigration")
+    except Exception:
+        return fallback
+
+
+logger = _create_bootstrap_logger()
 
 
 def _ensure_import_paths() -> None:
-    project_root_str = str(PROJECT_ROOT)
-    plugin_root_str = str(PLUGIN_ROOT)
-    if project_root_str not in sys.path:
-        sys.path.insert(0, project_root_str)
-    if plugin_root_str not in sys.path:
-        sys.path.insert(0, plugin_root_str)
+    for path in (WORKSPACE_ROOT, MAIBOT_ROOT, PLUGIN_ROOT):
+        path_str = str(path)
+        if path_str not in sys.path:
+            sys.path.insert(0, path_str)
 
 
 def _ensure_runtime_core_package() -> str:
@@ -180,7 +195,7 @@ def _load_embedding_adapter_factory() -> None:
     create_embedding_api_adapter = api_adapter_module.create_embedding_api_adapter
 
 
-DEFAULT_SOURCE_DB = PROJECT_ROOT / "data" / "MaiBot.db"
+DEFAULT_SOURCE_DB = MAIBOT_ROOT / "data" / "MaiBot.db"
 DEFAULT_TARGET_DATA_DIR = PLUGIN_ROOT / "data"
 DEFAULT_CONFIG_PATH = PLUGIN_ROOT / "config.toml"
 
@@ -687,7 +702,7 @@ class MigrationRunner:
         except Exception as e:
             self.failed = True
             self.fail_reason = str(e)
-            logger.error(f"迁移失败: {e}", exc_info=True)
+            logger.error(f"迁移失败: {e}\n{traceback.format_exc()}")
             return self._finalize()
         finally:
             self._close()

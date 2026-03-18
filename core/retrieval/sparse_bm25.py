@@ -123,9 +123,8 @@ class SparseBM25Index:
         self._loaded = True
         self._prepare_tokenizer()
         logger.info(
-            "SparseBM25Index loaded: backend=fts5, tokenizer=%s, mode=%s",
-            self.config.tokenizer_mode,
-            self.config.mode,
+            "SparseBM25Index loaded: "
+            f"backend=fts5, tokenizer={self.config.tokenizer_mode}, mode={self.config.mode}"
         )
         return True
 
@@ -141,9 +140,9 @@ class SparseBM25Index:
         if user_dict:
             try:
                 jieba.load_userdict(user_dict)  # type: ignore[union-attr]
-                logger.info("已加载 jieba 用户词典: %s", user_dict)
+                logger.info(f"已加载 jieba 用户词典: {user_dict}")
             except Exception as e:
-                logger.warning("加载 jieba 用户词典失败: %s", e)
+                logger.warning(f"加载 jieba 用户词典失败: {e}")
         self._jieba_dict_loaded = True
 
     def _tokenize_jieba(self, text: str) -> List[str]:

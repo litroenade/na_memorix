@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import time
+import traceback
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.common.logger import get_logger
-from src.plugin_system.apis import llm_api
+from src.services import llm_service as llm_api
 
 from ..storage import (
     parse_import_strategy,
@@ -357,7 +358,7 @@ class ImportTaskManager:
         return self._resolve_data_dir() / "import_backup"
 
     def _resolve_repo_root(self) -> Path:
-        return Path(__file__).resolve().parents[4]
+        return Path(__file__).resolve().parents[3]
 
     def _resolve_data_dir(self) -> Path:
         data_dir = Path(self.plugin.get_config("storage.data_dir", "./data"))
@@ -370,8 +371,8 @@ class ImportTaskManager:
         return Path(__file__).resolve().parents[2] / "scripts" / "migrate_maibot_memory.py"
 
     def _default_maibot_source_db(self) -> Path:
-        # plugins/A_memorix/core/utils -> repo root = parents[4]
-        return Path(__file__).resolve().parents[4] / "data" / "MaiBot.db"
+        # A_memorix/core/utils -> workspace root
+        return self._resolve_repo_root() / "MaiBot" / "data" / "MaiBot.db"
 
     def _cfg(self, key: str, default: Any) -> Any:
         return self.plugin.get_config(key, default)
@@ -973,16 +974,30 @@ class ImportTaskManager:
 
             max_size = self._max_file_size_bytes()
             for idx, uploaded in enumerate(files):
-                name = _safe_filename(getattr(uploaded, "filename", f"file_{idx}.txt"))
-                ext = Path(name).suffix.lower()
-                if ext not in {".txt", ".md", ".json"}:
-                    raise ValueError(f"不支持的文件类型: {name}")
-                content = await uploaded.read()
-                if len(content) > max_size:
-                    raise ValueError(f"文件超过大小限制: {name}")
                 file_id = uuid.uuid4().hex
-                temp_path = task_dir / f"{file_id}_{name}"
-                temp_path.write_bytes(content)
+                if isinstance(uploaded, dict):
+                    staged_path_raw = uploaded.get("staged_path") or uploaded.get("path") or ""
+                    staged_path = Path(str(staged_path_raw or "")).expanduser().resolve()
+                    if not staged_path.is_file():
+                        raise ValueError(f"上传暂存文件不存在: {staged_path}")
+                    name = _safe_filename(uploaded.get("filename") or uploaded.get("name") or staged_path.name)
+                    ext = Path(name).suffix.lower()
+                    if ext not in {".txt", ".md", ".json"}:
+                        raise ValueError(f"不支持的文件类型: {name}")
+                    if staged_path.stat().st_size > max_size:
+                        raise ValueError(f"文件超过大小限制: {name}")
+                    temp_path = task_dir / f"{file_id}_{name}"
+                    shutil.copy2(staged_path, temp_path)
+                else:
+                    name = _safe_filename(getattr(uploaded, "filename", f"file_{idx}.txt"))
+                    ext = Path(name).suffix.lower()
+                    if ext not in {".txt", ".md", ".json"}:
+                        raise ValueError(f"不支持的文件类型: {name}")
+                    content = await uploaded.read()
+                    if len(content) > max_size:
+                        raise ValueError(f"文件超过大小限制: {name}")
+                    temp_path = task_dir / f"{file_id}_{name}"
+                    temp_path.write_bytes(content)
                 file_mode = "json" if ext == ".json" else params["input_mode"]
                 task.files.append(
                     ImportFileRecord(
@@ -1641,7 +1656,7 @@ class ImportTaskManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"导入任务执行失败 task={task_id}: {e}", exc_info=True)
+                logger.error(f"导入任务执行失败 task={task_id}: {e}\n{traceback.format_exc()}")
                 async with self._lock:
                     task = self._tasks.get(task_id)
                     if task and task.status not in {"cancelled", "completed", "completed_with_errors"}:
@@ -1981,7 +1996,7 @@ class ImportTaskManager:
         params = dict(task.params)
 
         command = self._build_maibot_migration_command(params)
-        project_root = Path(__file__).resolve().parents[4]
+        project_root = self._resolve_repo_root()
         state_path = Path(params["target_data_dir"]) / "migration_state" / "chat_history_resume.json"
         report_path = Path(params["target_data_dir"]) / "migration_state" / "chat_history_report.json"
 
@@ -2551,10 +2566,10 @@ class ImportTaskManager:
             if not selected_chunks:
                 raise RuntimeError("失败分块重试索引无效，未匹配到可执行分块")
             logger.info(
-                "重试任务按失败分块执行 file=%s selected=%s total=%s",
-                file_record.name,
-                len(selected_chunks),
-                len(chunks),
+                "重试任务按失败分块执行: "
+                f"file={file_record.name} "
+                f"selected={len(selected_chunks)} "
+                f"total={len(chunks)}"
             )
 
         await self._register_chunks(task_id, file_record.file_id, selected_chunks)

@@ -13,9 +13,9 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.common.logger import get_logger
-from src.config.api_ada_configs import TaskConfig
+from src.config.model_configs import TaskConfig
 from src.config.config import model_config as host_model_config
-from src.plugin_system.apis import llm_api
+from src.services import llm_service as llm_api
 
 logger = get_logger("A_Memorix.EpisodeSegmentationService")
 

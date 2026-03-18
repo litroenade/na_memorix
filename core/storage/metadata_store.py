@@ -7,6 +7,8 @@
 import sqlite3
 import pickle
 import json
+import uuid
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union, List, Dict, Any, Tuple
@@ -24,7 +26,7 @@ from .knowledge_types import (
 logger = get_logger("A_Memorix.MetadataStore")
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class MetadataStore:
@@ -487,6 +489,76 @@ class MetadataStore:
             CREATE INDEX IF NOT EXISTS idx_episode_rebuild_updated_at
             ON episode_rebuild_sources(updated_at DESC)
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS external_memory_refs (
+                external_id TEXT PRIMARY KEY,
+                paragraph_hash TEXT NOT NULL,
+                source_type TEXT,
+                created_at REAL NOT NULL,
+                metadata_json TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_external_memory_refs_paragraph
+            ON external_memory_refs(paragraph_hash)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_v5_operations (
+                operation_id TEXT PRIMARY KEY,
+                action TEXT NOT NULL,
+                target TEXT,
+                reason TEXT,
+                updated_by TEXT,
+                created_at REAL NOT NULL,
+                resolved_hashes_json TEXT,
+                result_json TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memory_v5_operations_created
+            ON memory_v5_operations(created_at DESC)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS delete_operations (
+                operation_id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                selector TEXT,
+                reason TEXT,
+                requested_by TEXT,
+                status TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                restored_at REAL,
+                summary_json TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delete_operations_created
+            ON delete_operations(created_at DESC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delete_operations_mode
+            ON delete_operations(mode, created_at DESC)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS delete_operation_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation_id TEXT NOT NULL,
+                item_type TEXT NOT NULL,
+                item_hash TEXT,
+                item_key TEXT,
+                payload_json TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (operation_id) REFERENCES delete_operations(operation_id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delete_operation_items_operation
+            ON delete_operation_items(operation_id, id ASC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delete_operation_items_hash
+            ON delete_operation_items(item_hash)
+        """)
         # 新版 schema 包含完整字段，直接写入版本信息
         cursor.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)", (SCHEMA_VERSION, datetime.now().timestamp()))
         self._conn.commit()
@@ -591,6 +663,76 @@ class MetadataStore:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_episode_rebuild_updated_at
             ON episode_rebuild_sources(updated_at DESC)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS external_memory_refs (
+                external_id TEXT PRIMARY KEY,
+                paragraph_hash TEXT NOT NULL,
+                source_type TEXT,
+                created_at REAL NOT NULL,
+                metadata_json TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_external_memory_refs_paragraph
+            ON external_memory_refs(paragraph_hash)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_v5_operations (
+                operation_id TEXT PRIMARY KEY,
+                action TEXT NOT NULL,
+                target TEXT,
+                reason TEXT,
+                updated_by TEXT,
+                created_at REAL NOT NULL,
+                resolved_hashes_json TEXT,
+                result_json TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memory_v5_operations_created
+            ON memory_v5_operations(created_at DESC)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS delete_operations (
+                operation_id TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                selector TEXT,
+                reason TEXT,
+                requested_by TEXT,
+                status TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                restored_at REAL,
+                summary_json TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delete_operations_created
+            ON delete_operations(created_at DESC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delete_operations_mode
+            ON delete_operations(mode, created_at DESC)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS delete_operation_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation_id TEXT NOT NULL,
+                item_type TEXT NOT NULL,
+                item_hash TEXT,
+                item_key TEXT,
+                payload_json TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (operation_id) REFERENCES delete_operations(operation_id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delete_operation_items_operation
+            ON delete_operation_items(operation_id, id ASC)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delete_operation_items_hash
+            ON delete_operation_items(item_hash)
         """)
         
         # 检查paragraphs表是否有knowledge_type列
@@ -2491,6 +2633,406 @@ class MetadataStore:
 
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_external_memory_ref(self, external_id: str) -> Optional[Dict[str, Any]]:
+        """按 external_id 查询外部记忆映射。"""
+        token = str(external_id or "").strip()
+        if not token:
+            return None
+
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT external_id, paragraph_hash, source_type, created_at, metadata_json
+            FROM external_memory_refs
+            WHERE external_id = ?
+            LIMIT 1
+            """,
+            (token,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        payload = dict(row)
+        raw_metadata = payload.get("metadata_json")
+        if raw_metadata:
+            try:
+                payload["metadata"] = json.loads(raw_metadata)
+            except Exception:
+                payload["metadata"] = {}
+        else:
+            payload["metadata"] = {}
+        return payload
+
+    def upsert_external_memory_ref(
+        self,
+        *,
+        external_id: str,
+        paragraph_hash: str,
+        source_type: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """注册 external_id 到段落哈希的幂等映射。"""
+        external_token = str(external_id or "").strip()
+        paragraph_token = str(paragraph_hash or "").strip()
+        if not external_token:
+            raise ValueError("external_id 不能为空")
+        if not paragraph_token:
+            raise ValueError("paragraph_hash 不能为空")
+
+        now = datetime.now().timestamp()
+        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO external_memory_refs (
+                external_id, paragraph_hash, source_type, created_at, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(external_id) DO UPDATE SET
+                paragraph_hash = excluded.paragraph_hash,
+                source_type = excluded.source_type,
+                metadata_json = excluded.metadata_json
+            """,
+            (
+                external_token,
+                paragraph_token,
+                str(source_type or "").strip() or None,
+                now,
+                metadata_json,
+            ),
+        )
+        self._conn.commit()
+        return self.get_external_memory_ref(external_token) or {
+            "external_id": external_token,
+            "paragraph_hash": paragraph_token,
+            "source_type": str(source_type or "").strip(),
+            "created_at": now,
+            "metadata": metadata or {},
+        }
+
+    @staticmethod
+    def _json_dumps(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _json_loads(value: Any, default: Any) -> Any:
+        if value in {None, ""}:
+            return default
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
+
+    def list_external_memory_refs_by_paragraphs(self, paragraph_hashes: List[str]) -> List[Dict[str, Any]]:
+        hashes = [str(item or "").strip() for item in (paragraph_hashes or []) if str(item or "").strip()]
+        if not hashes:
+            return []
+        placeholders = ",".join(["?"] * len(hashes))
+        cursor = self._conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT external_id, paragraph_hash, source_type, created_at, metadata_json
+            FROM external_memory_refs
+            WHERE paragraph_hash IN ({placeholders})
+            ORDER BY created_at ASC, external_id ASC
+            """,
+            tuple(hashes),
+        )
+        items: List[Dict[str, Any]] = []
+        for row in cursor.fetchall():
+            payload = dict(row)
+            payload["metadata"] = self._json_loads(payload.get("metadata_json"), {})
+            items.append(payload)
+        return items
+
+    def delete_external_memory_refs_by_paragraphs(self, paragraph_hashes: List[str]) -> List[Dict[str, Any]]:
+        items = self.list_external_memory_refs_by_paragraphs(paragraph_hashes)
+        hashes = [str(item or "").strip() for item in (paragraph_hashes or []) if str(item or "").strip()]
+        if not hashes:
+            return items
+        placeholders = ",".join(["?"] * len(hashes))
+        cursor = self._conn.cursor()
+        cursor.execute(
+            f"DELETE FROM external_memory_refs WHERE paragraph_hash IN ({placeholders})",
+            tuple(hashes),
+        )
+        self._conn.commit()
+        return items
+
+    def restore_external_memory_refs(self, refs: List[Dict[str, Any]]) -> int:
+        count = 0
+        for item in refs or []:
+            external_id = str(item.get("external_id", "") or "").strip()
+            paragraph_hash = str(item.get("paragraph_hash", "") or "").strip()
+            if not external_id or not paragraph_hash:
+                continue
+            created_at = float(item.get("created_at") or datetime.now().timestamp())
+            metadata_json = self._json_dumps(item.get("metadata") or {})
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO external_memory_refs (
+                    external_id, paragraph_hash, source_type, created_at, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(external_id) DO UPDATE SET
+                    paragraph_hash = excluded.paragraph_hash,
+                    source_type = excluded.source_type,
+                    created_at = excluded.created_at,
+                    metadata_json = excluded.metadata_json
+                """,
+                (
+                    external_id,
+                    paragraph_hash,
+                    str(item.get("source_type", "") or "").strip() or None,
+                    created_at,
+                    metadata_json,
+                ),
+            )
+            count += max(0, int(cursor.rowcount or 0))
+        self._conn.commit()
+        return count
+
+    def record_v5_operation(
+        self,
+        *,
+        action: str,
+        target: str,
+        resolved_hashes: List[str],
+        reason: str = "",
+        updated_by: str = "",
+        result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        operation_id = f"v5_{uuid.uuid4().hex}"
+        created_at = datetime.now().timestamp()
+        payload = {
+            "operation_id": operation_id,
+            "action": str(action or "").strip(),
+            "target": str(target or "").strip(),
+            "reason": str(reason or "").strip(),
+            "updated_by": str(updated_by or "").strip(),
+            "created_at": created_at,
+            "resolved_hashes": [str(item or "").strip() for item in (resolved_hashes or []) if str(item or "").strip()],
+            "result": result or {},
+        }
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO memory_v5_operations (
+                operation_id, action, target, reason, updated_by, created_at, resolved_hashes_json, result_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                operation_id,
+                payload["action"],
+                payload["target"] or None,
+                payload["reason"] or None,
+                payload["updated_by"] or None,
+                created_at,
+                self._json_dumps(payload["resolved_hashes"]),
+                self._json_dumps(payload["result"]),
+            ),
+        )
+        self._conn.commit()
+        return payload
+
+    def create_delete_operation(
+        self,
+        *,
+        mode: str,
+        selector: Any,
+        items: List[Dict[str, Any]],
+        reason: str = "",
+        requested_by: str = "",
+        status: str = "executed",
+        summary: Optional[Dict[str, Any]] = None,
+        operation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        op_id = str(operation_id or f"del_{uuid.uuid4().hex}").strip()
+        created_at = datetime.now().timestamp()
+        normalized_items: List[Dict[str, Any]] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("item_type", "") or "").strip()
+            if not item_type:
+                continue
+            normalized_items.append(
+                {
+                    "item_type": item_type,
+                    "item_hash": str(item.get("item_hash", "") or "").strip() or None,
+                    "item_key": str(item.get("item_key", "") or item.get("item_hash", "") or "").strip() or None,
+                    "payload": item.get("payload") if isinstance(item.get("payload"), dict) else {},
+                }
+            )
+
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO delete_operations (
+                operation_id, mode, selector, reason, requested_by, status, created_at, restored_at, summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            """,
+            (
+                op_id,
+                str(mode or "").strip(),
+                self._json_dumps(selector if selector is not None else {}),
+                str(reason or "").strip() or None,
+                str(requested_by or "").strip() or None,
+                str(status or "executed").strip(),
+                created_at,
+                self._json_dumps(summary or {}),
+            ),
+        )
+        if normalized_items:
+            cursor.executemany(
+                """
+                INSERT INTO delete_operation_items (
+                    operation_id, item_type, item_hash, item_key, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        op_id,
+                        item["item_type"],
+                        item["item_hash"],
+                        item["item_key"],
+                        self._json_dumps(item["payload"]),
+                        created_at,
+                    )
+                    for item in normalized_items
+                ],
+            )
+        self._conn.commit()
+        return self.get_delete_operation(op_id) or {
+            "operation_id": op_id,
+            "mode": str(mode or "").strip(),
+            "selector": selector,
+            "reason": str(reason or "").strip(),
+            "requested_by": str(requested_by or "").strip(),
+            "status": str(status or "executed").strip(),
+            "created_at": created_at,
+            "summary": summary or {},
+            "items": normalized_items,
+        }
+
+    def mark_delete_operation_restored(
+        self,
+        operation_id: str,
+        *,
+        summary: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        token = str(operation_id or "").strip()
+        if not token:
+            return False
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            UPDATE delete_operations
+            SET status = ?, restored_at = ?, summary_json = ?
+            WHERE operation_id = ?
+            """,
+            (
+                "restored",
+                datetime.now().timestamp(),
+                self._json_dumps(summary or {}),
+                token,
+            ),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def list_delete_operations(self, *, limit: int = 50, mode: str = "") -> List[Dict[str, Any]]:
+        cursor = self._conn.cursor()
+        params: List[Any] = []
+        where = ""
+        mode_token = str(mode or "").strip().lower()
+        if mode_token:
+            where = "WHERE LOWER(mode) = ?"
+            params.append(mode_token)
+        params.append(max(1, int(limit or 50)))
+        cursor.execute(
+            f"""
+            SELECT operation_id, mode, selector, reason, requested_by, status, created_at, restored_at, summary_json
+            FROM delete_operations
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        )
+        items: List[Dict[str, Any]] = []
+        for row in cursor.fetchall():
+            payload = dict(row)
+            payload["selector"] = self._json_loads(payload.get("selector"), {})
+            payload["summary"] = self._json_loads(payload.get("summary_json"), {})
+            items.append(payload)
+        return items
+
+    def get_delete_operation(self, operation_id: str) -> Optional[Dict[str, Any]]:
+        token = str(operation_id or "").strip()
+        if not token:
+            return None
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT operation_id, mode, selector, reason, requested_by, status, created_at, restored_at, summary_json
+            FROM delete_operations
+            WHERE operation_id = ?
+            LIMIT 1
+            """,
+            (token,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        payload = dict(row)
+        payload["selector"] = self._json_loads(payload.get("selector"), {})
+        payload["summary"] = self._json_loads(payload.get("summary_json"), {})
+
+        cursor.execute(
+            """
+            SELECT item_type, item_hash, item_key, payload_json, created_at
+            FROM delete_operation_items
+            WHERE operation_id = ?
+            ORDER BY id ASC
+            """,
+            (token,),
+        )
+        payload["items"] = [
+            {
+                "item_type": str(item["item_type"] or ""),
+                "item_hash": str(item["item_hash"] or ""),
+                "item_key": str(item["item_key"] or ""),
+                "payload": self._json_loads(item["payload_json"], {}),
+                "created_at": item["created_at"],
+            }
+            for item in cursor.fetchall()
+        ]
+        return payload
+
+    def purge_deleted_relations(self, *, cutoff_time: float, limit: int = 1000) -> List[str]:
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT hash
+            FROM deleted_relations
+            WHERE deleted_at IS NOT NULL AND deleted_at < ?
+            ORDER BY deleted_at ASC
+            LIMIT ?
+            """,
+            (float(cutoff_time), max(1, int(limit or 1000))),
+        )
+        hashes = [str(row[0] or "").strip() for row in cursor.fetchall() if str(row[0] or "").strip()]
+        if not hashes:
+            return []
+        placeholders = ",".join(["?"] * len(hashes))
+        cursor.execute(f"DELETE FROM deleted_relations WHERE hash IN ({placeholders})", tuple(hashes))
+        self._conn.commit()
+        return hashes
+
     def get_statistics(self) -> Dict[str, int]:
         """
         获取统计信息
@@ -2846,6 +3388,18 @@ class MetadataStore:
         cursor.execute(
             "UPDATE entities SET is_deleted=0, deleted_at=NULL WHERE hash=?",
             (str(entity_hash),),
+        )
+        changed = cursor.rowcount > 0
+        if changed:
+            self._conn.commit()
+        return changed
+
+    def restore_paragraph_by_hash(self, paragraph_hash: str) -> bool:
+        """恢复软删除段落。"""
+        cursor = self._conn.cursor()
+        cursor.execute(
+            "UPDATE paragraphs SET is_deleted=0, deleted_at=NULL WHERE hash=?",
+            (str(paragraph_hash),),
         )
         changed = cursor.rowcount > 0
         if changed:
@@ -4594,6 +5148,29 @@ class MetadataStore:
         )
         self._conn.commit()
 
+    def get_episode_pending_status_counts(self, source: str) -> Dict[str, int]:
+        """统计某个 source 当前 pending 队列中的状态分布。"""
+        token = self._normalize_episode_source(source)
+        if not token:
+            return {"pending": 0, "running": 0, "failed": 0, "done": 0}
+
+        cursor = self._conn.cursor()
+        cursor.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM episode_pending_paragraphs
+            WHERE TRIM(COALESCE(source, '')) = ?
+            GROUP BY status
+            """,
+            (token,),
+        )
+        counts = {"pending": 0, "running": 0, "failed": 0, "done": 0}
+        for row in cursor.fetchall():
+            status = str(row["status"] or "").strip().lower()
+            if status in counts:
+                counts[status] = int(row["count"] or 0)
+        return counts
+
     def _episode_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         data = dict(row)
 
@@ -4800,7 +5377,7 @@ class MetadataStore:
                 SELECT 1
                 FROM episode_rebuild_sources ers
                 WHERE ers.source = TRIM(COALESCE(e.source, ''))
-                  AND ers.status IN ('pending', 'running', 'failed')
+                  AND ers.status IN ('pending', 'running')
             )
             """
         )
@@ -4843,6 +5420,26 @@ class MetadataStore:
             params.append(float(time_to))
 
         return source_expr, effective_start, effective_end, conditions, params
+
+    @staticmethod
+    def _tokenize_episode_query(query: str) -> Tuple[str, List[str]]:
+        """将 episode 查询归一化为短语和 token。"""
+        normalized = normalize_text(str(query or "")).strip().lower()
+        if not normalized:
+            return "", []
+
+        token_pattern = re.compile(r"[A-Za-z0-9_\u4e00-\u9fff]{2,}")
+        tokens: List[str] = []
+        seen = set()
+        for token in token_pattern.findall(normalized):
+            if token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+
+        if not tokens and len(normalized) >= 2:
+            tokens = [normalized]
+        return normalized, tokens
 
     def get_episode_rows_by_paragraph_hashes(
         self,
@@ -4993,28 +5590,58 @@ class MetadataStore:
             source=source,
         )
 
-        q = str(query or "").strip().lower()
+        q, tokens = self._tokenize_episode_query(query)
         select_score_sql = "0.0 AS lexical_score"
         order_sql = f"{effective_end} DESC, e.updated_at DESC"
         select_params: List[Any] = []
         query_params: List[Any] = []
         if q:
-            like = f"%{q}%"
-            title_expr = "LOWER(COALESCE(e.title, '')) LIKE ?"
-            summary_expr = "LOWER(COALESCE(e.summary, '')) LIKE ?"
-            keywords_expr = "LOWER(COALESCE(e.keywords_json, '')) LIKE ?"
-            participants_expr = "LOWER(COALESCE(e.participants_json, '')) LIKE ?"
-            conditions.append(
-                f"({title_expr} OR {summary_expr} OR {keywords_expr} OR {participants_expr})"
+            field_exprs = {
+                "title": "LOWER(COALESCE(e.title, ''))",
+                "summary": "LOWER(COALESCE(e.summary, ''))",
+                "keywords": "LOWER(COALESCE(e.keywords_json, ''))",
+                "participants": "LOWER(COALESCE(e.participants_json, ''))",
+            }
+
+            score_parts: List[str] = []
+            phrase_like = f"%{q}%"
+            score_parts.extend(
+                [
+                    f"CASE WHEN {field_exprs['title']} LIKE ? THEN 6.0 ELSE 0.0 END",
+                    f"CASE WHEN {field_exprs['keywords']} LIKE ? THEN 4.5 ELSE 0.0 END",
+                    f"CASE WHEN {field_exprs['summary']} LIKE ? THEN 3.0 ELSE 0.0 END",
+                    f"CASE WHEN {field_exprs['participants']} LIKE ? THEN 2.0 ELSE 0.0 END",
+                ]
             )
-            select_score_sql = (
-                f"(CASE WHEN {title_expr} THEN 4.0 ELSE 0.0 END + "
-                f"CASE WHEN {keywords_expr} THEN 3.0 ELSE 0.0 END + "
-                f"CASE WHEN {summary_expr} THEN 2.0 ELSE 0.0 END + "
-                f"CASE WHEN {participants_expr} THEN 1.0 ELSE 0.0 END) AS lexical_score"
-            )
-            select_params.extend([like, like, like, like])
-            query_params.extend([like, like, like, like])
+            select_params.extend([phrase_like, phrase_like, phrase_like, phrase_like])
+
+            token_predicates: List[str] = []
+            for token in tokens:
+                like = f"%{token}%"
+                token_any = (
+                    f"({field_exprs['title']} LIKE ? OR "
+                    f"{field_exprs['summary']} LIKE ? OR "
+                    f"{field_exprs['keywords']} LIKE ? OR "
+                    f"{field_exprs['participants']} LIKE ?)"
+                )
+                token_predicates.append(token_any)
+                query_params.extend([like, like, like, like])
+
+                score_parts.append(
+                    "("
+                    f"CASE WHEN {field_exprs['title']} LIKE ? THEN 3.0 ELSE 0.0 END + "
+                    f"CASE WHEN {field_exprs['keywords']} LIKE ? THEN 2.5 ELSE 0.0 END + "
+                    f"CASE WHEN {field_exprs['summary']} LIKE ? THEN 2.0 ELSE 0.0 END + "
+                    f"CASE WHEN {field_exprs['participants']} LIKE ? THEN 1.5 ELSE 0.0 END + "
+                    f"CASE WHEN {token_any.replace('?', '?')} THEN 2.0 ELSE 0.0 END"
+                    ")"
+                )
+                select_params.extend([like, like, like, like, like, like, like, like])
+
+            if token_predicates:
+                conditions.append("(" + " OR ".join(token_predicates) + ")")
+
+            select_score_sql = f"({' + '.join(score_parts)}) AS lexical_score"
             order_sql = f"lexical_score DESC, {effective_end} DESC, e.updated_at DESC"
 
         where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""

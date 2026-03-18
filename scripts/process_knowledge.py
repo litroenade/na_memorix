@@ -17,7 +17,6 @@ import asyncio
 import time
 import random
 import hashlib
-import logging
 import tomlkit
 import argparse
 from pathlib import Path
@@ -25,7 +24,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 from rich.console import Console
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 console = Console()
 
@@ -35,8 +34,12 @@ class LLMGenerationError(Exception):
 # 路径设置
 current_dir = Path(__file__).resolve().parent
 plugin_root = current_dir.parent
-project_root = plugin_root.parent.parent
-sys.path.insert(0, str(project_root))
+workspace_root = plugin_root.parent
+maibot_root = workspace_root / "MaiBot"
+for path in (workspace_root, maibot_root, plugin_root):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
 
 # 数据目录
 DATA_DIR = plugin_root / "data"
@@ -76,22 +79,12 @@ if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
 
 
 try:
-    import src
-    import plugins
-    
-    script_path = Path(__file__).resolve()
-    plugin_dir = script_path.parent.parent
-    plugin_name = plugin_dir.name
-    
-    import importlib
-    if f"plugins.{plugin_name}" not in sys.modules:
-        importlib.import_module(f"plugins.{plugin_name}")
-
+    import A_memorix.core as core_module
+    import A_memorix.core.storage as storage_module
     from src.common.logger import get_logger
-    from src.plugin_system.apis import llm_api
+    from src.services import llm_service as llm_api
     from src.config.config import global_config, model_config
-    
-    core_module = importlib.import_module(f"plugins.{plugin_name}.core")
+
     VectorStore = core_module.VectorStore
     GraphStore = core_module.GraphStore
     MetadataStore = core_module.MetadataStore
@@ -99,26 +92,18 @@ try:
     create_embedding_api_adapter = core_module.create_embedding_api_adapter
     RelationWriteService = getattr(core_module, "RelationWriteService", None)
 
-    storage_module = importlib.import_module(f"plugins.{plugin_name}.core.storage")
     looks_like_quote_text = storage_module.looks_like_quote_text
     parse_import_strategy = storage_module.parse_import_strategy
     resolve_stored_knowledge_type = storage_module.resolve_stored_knowledge_type
     select_import_strategy = storage_module.select_import_strategy
-    utils_module = importlib.import_module(f"plugins.{plugin_name}.core.utils")
-    normalize_time_meta = utils_module.normalize_time_meta
-    normalize_paragraph_import_item = importlib.import_module(
-        f"plugins.{plugin_name}.core.utils.import_payloads"
-    ).normalize_paragraph_import_item
 
-    # Strategies
-    strategies_module = importlib.import_module(f"plugins.{plugin_name}.core.strategies")
-    # Assuming strategies are exposed in __init__ or we import them directly
-    # Since we didn't put them in __init__, let's import directly
-    from plugins.A_memorix.core.strategies.base import BaseStrategy, ProcessedChunk, KnowledgeType as StratKnowledgeType
-    from plugins.A_memorix.core.strategies.narrative import NarrativeStrategy
-    from plugins.A_memorix.core.strategies.factual import FactualStrategy
-    from plugins.A_memorix.core.strategies.quote import QuoteStrategy
-    
+    from A_memorix.core.utils.time_parser import normalize_time_meta
+    from A_memorix.core.utils.import_payloads import normalize_paragraph_import_item
+    from A_memorix.core.strategies.base import BaseStrategy, ProcessedChunk, KnowledgeType as StratKnowledgeType
+    from A_memorix.core.strategies.narrative import NarrativeStrategy
+    from A_memorix.core.strategies.factual import FactualStrategy
+    from A_memorix.core.strategies.quote import QuoteStrategy
+
 except ImportError as e:
     print(f"❌ 无法导入模块: {e}")
     import traceback
@@ -126,6 +111,20 @@ except ImportError as e:
     sys.exit(1)
 
 logger = get_logger("A_Memorix.AutoImport")
+
+
+def _log_before_retry(retry_state) -> None:
+    """使用项目统一日志风格记录重试信息。"""
+    exc = None
+    if getattr(retry_state, "outcome", None) is not None and retry_state.outcome.failed:
+        exc = retry_state.outcome.exception()
+    next_sleep = getattr(getattr(retry_state, "next_action", None), "sleep", None)
+    logger.warning(
+        "LLM 调用即将重试: "
+        f"attempt={getattr(retry_state, 'attempt_number', '?')} "
+        f"next_sleep={next_sleep} "
+        f"error={exc}"
+    )
 
 class AutoImporter:
     def __init__(
@@ -565,7 +564,7 @@ Chat paragraph:
         retry=retry_if_exception_type((LLMGenerationError, json.JSONDecodeError)),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        before_sleep=before_sleep_log(logger, logging.WARNING)
+        before_sleep=_log_before_retry
     )
     async def _llm_call(self, prompt: str, model_config: Any) -> Dict:
         """Generic LLM Caller"""

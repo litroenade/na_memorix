@@ -46,9 +46,14 @@ if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
     _build_arg_parser().print_help()
     sys.exit(0)
 
-# 设置日志
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("LPMM_Converter")
+# 设置日志：优先复用 MaiBot 统一日志体系，失败时回退到标准 logging。
+try:
+    from src.common.logger import get_logger
+
+    logger = get_logger("A_Memorix.LPMMConverter")
+except Exception:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    logger = logging.getLogger("A_Memorix.LPMMConverter")
 
 try:
     import networkx as nx
@@ -225,11 +230,11 @@ class LPMMConverter:
                 failed += 1
 
         logger.info(
-            "关系向量重建完成: total=%s success=%s skipped=%s failed=%s",
-            len(rows),
-            success,
-            skipped,
-            failed,
+            "关系向量重建完成: "
+            f"total={len(rows)} "
+            f"success={success} "
+            f"skipped={skipped} "
+            f"failed={failed}"
         )
 
     @staticmethod
@@ -317,8 +322,8 @@ class LPMMConverter:
             if p_type == "relation":
                 relation_count = self._import_relation_metadata_from_parquet(p_path)
                 logger.warning(
-                    "跳过 relation.parquet 向量导入（保持一致性）；已导入关系元数据: %s",
-                    relation_count,
+                    "跳过 relation.parquet 向量导入（保持一致性）；"
+                    f"已导入关系元数据: {relation_count}"
                 )
                 continue
 

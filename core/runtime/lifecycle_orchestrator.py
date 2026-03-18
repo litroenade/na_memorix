@@ -39,9 +39,9 @@ async def ensure_initialized(plugin: Any) -> None:
         report = await ensure_runtime_self_check(plugin, force=True)
         if not bool(report.get("ok", False)):
             logger.error(
-                "A_Memorix runtime self-check failed: %s; "
-                "建议执行 python plugins/A_memorix/scripts/runtime_self_check.py --json",
-                report.get("message", "unknown"),
+                "A_Memorix runtime self-check failed: "
+                f"{report.get('message', 'unknown')}; "
+                "建议执行 python plugins/A_memorix/scripts/runtime_self_check.py --json"
             )
 
         if plugin.graph_store and plugin.metadata_store:
@@ -180,9 +180,9 @@ async def initialize_storage_async(plugin: Any) -> None:
     )
     plugin.vector_store.min_train_threshold = plugin.get_config("embedding.min_train_threshold", 40)
     logger.info(
-        "向量存储初始化完成（维度: %s, 训练阈值: %s）",
-        detected_dimension,
-        plugin.vector_store.min_train_threshold,
+        "向量存储初始化完成（"
+        f"维度: {detected_dimension}, "
+        f"训练阈值: {plugin.vector_store.min_train_threshold}）"
     )
 
     matrix_format_str = plugin.get_config("graph.sparse_matrix_format", "csr")
@@ -223,11 +223,11 @@ async def initialize_storage_async(plugin: Any) -> None:
         config=sparse_cfg,
     )
     logger.info(
-        "稀疏检索组件初始化完成: enabled=%s, lazy_load=%s, mode=%s, tokenizer=%s",
-        sparse_cfg.enabled,
-        sparse_cfg.lazy_load,
-        sparse_cfg.mode,
-        sparse_cfg.tokenizer_mode,
+        "稀疏检索组件初始化完成: "
+        f"enabled={sparse_cfg.enabled}, "
+        f"lazy_load={sparse_cfg.lazy_load}, "
+        f"mode={sparse_cfg.mode}, "
+        f"tokenizer={sparse_cfg.tokenizer_mode}"
     )
     if sparse_cfg.enabled and not sparse_cfg.lazy_load:
         plugin.sparse_index.ensure_loaded()
@@ -243,18 +243,17 @@ async def initialize_storage_async(plugin: Any) -> None:
         warmup_summary = plugin.vector_store.warmup_index(force_train=True)
         if warmup_summary.get("ok"):
             logger.info(
-                "向量索引预热完成: trained=%s, index_ntotal=%s, fallback_ntotal=%s, "
-                "bin_count=%s, duration_ms=%.2f",
-                warmup_summary.get("trained"),
-                warmup_summary.get("index_ntotal"),
-                warmup_summary.get("fallback_ntotal"),
-                warmup_summary.get("bin_count"),
-                float(warmup_summary.get("duration_ms", 0.0)),
+                "向量索引预热完成: "
+                f"trained={warmup_summary.get('trained')}, "
+                f"index_ntotal={warmup_summary.get('index_ntotal')}, "
+                f"fallback_ntotal={warmup_summary.get('fallback_ntotal')}, "
+                f"bin_count={warmup_summary.get('bin_count')}, "
+                f"duration_ms={float(warmup_summary.get('duration_ms', 0.0)):.2f}"
             )
         else:
             logger.warning(
-                "向量索引预热失败，继续启用 sparse 降级路径: %s",
-                warmup_summary.get("error", "unknown"),
+                "向量索引预热失败，继续启用 sparse 降级路径: "
+                f"{warmup_summary.get('error', 'unknown')}"
             )
     except Exception as e:
         logger.warning(f"向量索引预热异常，继续启用 sparse 降级路径: {e}")

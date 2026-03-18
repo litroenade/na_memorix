@@ -70,7 +70,7 @@ class EpisodeRetrievalService:
                     temporal=temporal,
                 )
             except Exception as exc:
-                logger.warning("episode evidence retrieval failed, fallback to lexical only: %s", exc)
+                logger.warning(f"episode evidence retrieval failed, fallback to lexical only: {exc}")
             else:
                 paragraph_rank_map: Dict[str, int] = {}
                 relation_rank_map: Dict[str, int] = {}

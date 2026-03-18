@@ -285,10 +285,10 @@ class DualPathRetriever:
         relation_intent_ctx = self._build_relation_intent_context(query=query, top_k=top_k)
 
         logger.info(
-            "执行检索: query='%s...', strategy=%s, relation_intent=%s",
-            query[:50],
-            strategy.value,
-            relation_intent_ctx.get("enabled", False),
+            "执行检索: "
+            f"query='{query[:50]}...', "
+            f"strategy={strategy.value}, "
+            f"relation_intent={relation_intent_ctx.get('enabled', False)}"
         )
 
         if temporal and not (query or "").strip():
@@ -1408,10 +1408,10 @@ class DualPathRetriever:
             return results
 
         logger.debug(
-            "relation_rerank_applied=1 relation_pair_groups=%s relation_pair_overflow_count=%s relation_pair_limit=%s",
-            len(ordered_groups),
-            len(overflow),
-            pair_limit,
+            "relation_rerank_applied=1 "
+            f"relation_pair_groups={len(ordered_groups)} "
+            f"relation_pair_overflow_count={len(overflow)} "
+            f"relation_pair_limit={pair_limit}"
         )
 
         rebuilt = list(results)
@@ -1455,9 +1455,9 @@ class DualPathRetriever:
                 )
         except asyncio.TimeoutError:
             logger.warning(
-                "metric.ppr_timeout_skip_count=1 timeout_s=%s entities=%s",
-                ppr_timeout_s,
-                len(entities),
+                "metric.ppr_timeout_skip_count=1 "
+                f"timeout_s={ppr_timeout_s} "
+                f"entities={len(entities)}"
             )
             return results
         except Exception as e:

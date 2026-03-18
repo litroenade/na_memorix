@@ -170,7 +170,7 @@ class GraphRelationRecallService:
                 max_paths=self.config.max_paths,
             )
         except Exception as e:
-            logger.debug("graph two-hop recall skipped: %s", e)
+            logger.debug(f"graph two-hop recall skipped: {e}")
             return
 
         for path_nodes in paths:
@@ -210,7 +210,7 @@ class GraphRelationRecallService:
                 limit=self.config.candidate_k,
             )
         except Exception as e:
-            logger.debug("graph one-hop recall skipped: %s", e)
+            logger.debug(f"graph one-hop recall skipped: {e}")
             return
         self._append_relation_hashes(
             relation_hashes=relation_hashes,

@@ -8,14 +8,15 @@
 import time
 import json
 import re
+import traceback
 from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
 
 from src.common.logger import get_logger
-from src.plugin_system.apis import llm_api, message_api
-from src.chat.utils.prompt_builder import global_prompt_manager, Prompt
+from src.services import llm_service as llm_api
+from src.services import message_service as message_api
 from src.config.config import global_config, model_config as host_model_config
-from src.config.api_ada_configs import TaskConfig
+from src.config.model_configs import TaskConfig
 
 from ..storage import (
     KnowledgeType,
@@ -247,7 +248,7 @@ class SummaryImporter:
                 return False, "未找到有效的聊天记录进行总结"
 
             # 转换为可读文本
-            chat_history_text = message_api.build_readable_messages_to_str(messages)
+            chat_history_text = message_api.build_readable_messages(messages)
             
             # 3. 准备提示词内容
             bot_name = global_config.bot.nickname or "机器人"
@@ -289,7 +290,7 @@ class SummaryImporter:
             entities = data.get("entities", [])
             relations = data.get("relations", [])
             msg_times = [
-                float(getattr(msg, "time"))
+                float(getattr(getattr(msg, "timestamp", None), "timestamp", lambda: 0.0)())
                 for msg in messages
                 if getattr(msg, "time", None) is not None
             ]
@@ -318,7 +319,7 @@ class SummaryImporter:
             return True, result_msg
 
         except Exception as e:
-            logger.error(f"总结导入过程中出错: {e}", exc_info=True)
+            logger.error(f"总结导入过程中出错: {e}\n{traceback.format_exc()}")
             return False, f"错误: {str(e)}"
 
     async def _ensure_runtime_self_check(self) -> Tuple[bool, str]:
