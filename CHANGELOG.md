@@ -1,5 +1,41 @@
 # 更新日志 (Changelog)
 
+## [2.0.0] - 2026-03-18
+
+本次 `2.0.0` 为架构收敛版本，主线是 **SDK Tool 接口统一**、**管理工具能力补齐**、**元数据 schema 升级到 v8** 与 **文档口径同步到 2.0.0**。
+
+### 🔖 版本信息
+
+- 插件版本：`1.0.1` → `2.0.0`
+- 元数据 schema：`7` → `8`
+
+### 🚀 重点能力
+
+- Tool 接口统一：
+  - `plugin.py` 统一通过 `SDKMemoryKernel` 对外提供 Tool 能力。
+  - 保留基础工具：`search_memory / ingest_summary / ingest_text / get_person_profile / maintain_memory / memory_stats`。
+  - 新增管理工具：`memory_graph_admin / memory_source_admin / memory_episode_admin / memory_profile_admin / memory_runtime_admin / memory_import_admin / memory_tuning_admin / memory_v5_admin / memory_delete_admin`。
+- 检索与写入治理增强：
+  - 检索/写入链路支持 `respect_filter + user_id/group_id` 的聊天过滤语义。
+  - `maintain_memory` 支持 `freeze` 与 `recycle_bin`，并统一到内核维护流程。
+- 导入与调优能力收敛：
+  - `memory_import_admin` 提供任务化导入能力（上传、粘贴、扫描、OpenIE、LPMM 转换、时序回填、MaiBot 迁移）。
+  - `memory_tuning_admin` 提供检索调优任务（创建、轮次查看、回滚、apply_best、报告导出）。
+- V5 与删除运维：
+  - 新增 `memory_v5_admin`（`reinforce/weaken/remember_forever/forget/restore/status`）。
+  - 新增 `memory_delete_admin`（`preview/execute/restore/list/get/purge`），支持操作审计与恢复。
+
+### 🛠️ 存储与运行时
+
+- `metadata_store` 升级到 `SCHEMA_VERSION = 8`。
+- 新增/完善外部引用与运维记录能力（包括 `external_memory_refs`、`memory_v5_operations`、`delete_operations` 相关数据结构）。
+- `SDKMemoryKernel` 增加统一后台任务编排（自动保存、Episode pending 处理、画像刷新、记忆维护）。
+
+### 📚 文档同步
+
+- `README.md`、`QUICK_START.md`、`CONFIG_REFERENCE.md`、`IMPORT_GUIDE.md` 已切换到 `2.0.0` 口径。
+- 文档主入口统一为 SDK Tool 工作流，不再以旧版 slash 命令作为主说明路径。
+
 ## [1.0.1] - 2026-03-07
 
 本次 `1.0.1` 为 `1.0.0` 发布后的热修复版本，主线是 **图谱 WebUI 取数稳定性修复**、**大图过滤性能修复** 与 **真实检索调优链路稳定性修复**。

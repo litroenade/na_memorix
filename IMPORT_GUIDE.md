@@ -1,367 +1,263 @@
-# A_Memorix 导入指南与最佳实践 (Import Guide)
+# A_Memorix 导入指南 (v2.0.0)
 
-本文档旨在详细说明 A_Memorix 支持的各类导入文件格式、内部处理逻辑以及最佳实践，帮助用户构建高质量的知识库。
+本文档对应当前 `2.0.0` 代码路径，覆盖两类导入方式：
 
----
+1. 脚本导入（离线批处理）
+2. `memory_import_admin` 任务导入（在线任务化）
 
-## 策略模式 (Strategies)
+## 1. 导入前检查
 
-A_Memorix 采用 **策略模式 (Strategy-Aware)** 来处理不同类型的文本。导入脚本 (`process_knowledge.py`) 会尝试自动识别文本类型，也支持用户手动指定。
-
-目前支持以下三种策略：
-
-| 策略类型             | 适用场景                           | 核心逻辑                                                | 自动识别特征                         |
-| :------------------- | :--------------------------------- | :------------------------------------------------------ | :----------------------------------- |
-| **Narrative** (叙事) | 小说、同人文、剧本、长篇故事       | 按场景/章节切分，使用滑动窗口；提取“事件”和“角色关系”。 | `#`, `Chapter`, `***` 等章节标记     |
-| **Factual** (事实)   | 设定集、维基百科、百科全书、说明书 | 按语义块切分，保留列表/表格结构；提取“SPO三元组”。      | 包含列表符号、定义格式 (`Term: Def`) |
-| **Quote** (引用)     | 歌词、诗歌、名人名言、经典台词     | 按双换行符 (Stanza) 切分；原文即知识，不做提取。        | 平均行长短 (<20字符)，行数多         |
-
----
-
-## Web Import 导入中心（`/import`）
-
-从 `v0.6.0` 开始，A_Memorix 提供 Web Import 导入中心作为统一导入入口。
-
-### 入口与基本使用流程
-
-1. 启动可视化服务后，访问 `http://localhost:8082/import`。
-2. 在顶部选择任务类型页签（上传、粘贴、本地扫描、OpenIE、转换、回填、MaiBot迁移）。
-3. 设置通用参数（并发、策略、去重、LLM、chat_log 等）。
-4. 按当前页签填写任务参数并提交。
-5. 在右侧任务详情查看任务/文件/分块三级状态与进度。
-6. 需要时执行取消或失败重试。
-
-### 通用参数说明（适用于多数任务）
-
-- `file_concurrency`：任务内文件并发数（建议 1-6）。
-- `chunk_concurrency`：单文件分块并发数（建议 1-12）。
-- `strategy_override`：`auto/narrative/factual/quote`。
-- JSON 段落规范字段：`content`、`knowledge_type`、`source`、`time_meta`、`entities`、`relations`。
-- 兼容旧字段：`type` 会被视为 `knowledge_type` 的兼容别名。
-- `llm_enabled`：是否开启 LLM 抽取。
-- `dedupe_policy`：`content_hash/manifest/none`。
-- `chat_log` + `chat_reference_time`：聊天时间语义抽取及参考时间。
-- `force`：强制重导。
-- `clear_manifest`：导入前清理 manifest 命中记录。
-- `X-Memorix-Import-Token`：当 `web.import.token` 非空时必须携带。
-
-### 任务类型总览（功能介绍 + 使用方式）
-
-#### 1) 上传文件（`upload`）
-
-功能介绍：
-- 导入本机选择的 `txt/md/json` 文件。
-- 支持部分文件多选，支持文件级与分块级并发。
-
-使用方式：
-1. 选择“上传文件”页签。
-2. 选择 `文本输入模式`（`text` 或 `json`）。
-3. 点击“选择文件”并添加目标文件。
-4. 点击“提交上传任务”。
-
-#### 2) 粘贴导入（`paste`）
-
-功能介绍：
-- 直接粘贴文本或 JSON 字符串，无需落盘文件。
-- 适合快速验证抽取策略或小批量补录。
-
-使用方式：
-1. 选择“粘贴导入”页签。
-2. 选择 `text/json` 模式并粘贴内容。
-3. 可选填写名称。
-4. 点击“提交粘贴任务”。
-
-#### 3) 本地扫描（`raw_scan`）
-
-功能介绍：
-- 按白名单路径别名扫描目录并批量导入。
-- 支持 `glob` 与递归扫描，适合批量离线文档。
-
-使用方式：
-1. 选择“本地扫描”页签。
-2. 选择 `alias`，填写 `relative_path`（可选）。
-3. 设置 `glob`（如 `*.txt`）与 `recursive`。
-4. 点击“提交本地扫描任务”。
-
-#### 4) LPMM OpenIE 导入（`lpmm_openie`）
-
-功能介绍：
-- 导入 OpenIE JSON（优先 `*-openie.json`）。
-- 将 `docs[].passage/triples/entities` 映射到 A_Memorix 标准入库链路。
-
-使用方式：
-1. 选择“LPMM OpenIE”页签。
-2. 选择 `alias`，填写 `relative_path`（目录或文件）。
-3. 需要时开启“找不到 openie 文件时回退全部 json”。
-4. 提交任务并观察导入状态。
-
-#### 5) LPMM 二进制转换（`lpmm_convert`）
-
-功能介绍：
-- 对 LPMM 存储执行 staging 转换、校验、切换。
-- 目标是无 Token 迁移向量/图/元数据。
-
-使用方式：
-1. 选择“LPMM转换”页签。
-2. 填写输入 `alias + relative_path`。
-3. 填写目标 `alias + relative_path`。
-4. 设置 `dimension/batch_size`（可选）。
-5. 确认风险提示后提交任务。
-
-#### 6) 时序回填（`temporal_backfill`）
-
-功能介绍：
-- 为历史段落回填缺失的时间字段，提升时序检索命中率。
-- 支持 dry-run 预览与 limit 限流。
-
-使用方式：
-1. 选择“时序回填”页签。
-2. 选择目标路径（`alias + relative_path`）。
-3. 设置 `limit`、`dry_run`、`no_created_fallback`。
-4. 提交任务查看回填统计。
-
-#### 7) MaiBot 迁移（`maibot_migration`）
-
-功能介绍：
-- 调用迁移脚本将 `chat_history` 数据迁移入 A_Memorix。
-- 支持时间范围、ID范围、stream/group/user 过滤及断点续传控制。
-
-使用方式：
-1. 选择“MaiBot迁移”页签。
-2. 填写 `source_db` 及过滤参数（可选）。
-3. 设置批量参数（`read_batch_size`、`commit_window_rows` 等）。
-4. 按需选择 `dry-run/verify-only/no-resume/reset-state`。
-5. 提交任务并观察迁移进度。
-
-### 状态、重试与冲突保护
-
-- 三级可观测：任务级 / 文件级 / 分块级。
-- 失败重试：按钮“重试失败项（分块优先）”调用 `/retry_failed`。
-- 重试语义：先重试可安全分块失败；不可安全项自动回退文件级重试。
-- 运行控制：可取消任务，取消后已写入内容不回滚。
-- 写保护：导入运行中，其他写接口返回 `409` 以避免冲突写入。
-- 路径安全：本地路径任务仅允许 `web.import.path_aliases` 白名单目录。
-
----
-
-## 文件格式与最佳实践
-
-### 1. 叙事文本 (.txt) - `Narrative`
-
-适用于导入具有时间线和情节发展的内容。系统会重点提取**人物关系变化**和**关键事件**。
-
-**最佳实践：**
-
-- **明确章节分隔**：使用 Markdown 标题 (`# 第一章`) 或标准标识 (`Chapter 1`, `***`) 来分隔场景。这能帮助系统更准确地划分上下文。
-- **段落清晰**：保持自然的段落分隔。系统使用滑动窗口 (Window 800 / Overlap 200) 处理长文本，自然的换行有助于保持语义完整。
-- **人物称呼统一**：尽量在文中统一角色的称呼，有助于实体对齐。
-
-**示例：**
-
-```text
-# 第一章：初遇
-
-这是一个阳光明媚的早晨... (正文)
-
-***
-
-第二天晚上... (新场景)
-```
-
-> **💡 智能分块援救 (Chunk Rescue)**
-> 如果你在叙事文本中嵌入了大段歌词或诗句（如角色在唱歌），系统会自动检测到这些“短行密集”的区块，并自动切换为 `Quote` 策略进行处理，防止它们被错误地概括或拆散。（不建议过度依赖本功能）
-
-### 2. 事实文本 (.txt) - `Factual`
-
-适用于构建世界观设定、物品介绍或规则说明。系统会重点提取**三元组信息 (Subject-Predicate-Object)**。
-
-**最佳实践：**
-
-- **结构化排版**：善用列表 (`-`, `1.`) 和定义格式 (`术语：解释`)。系统检测到这些结构时会尽量避免在中间切分。
-- **信息密度**：单个段落尽量聚焦一个主题。
-- **避免过度修饰**：尽量使用陈述句，减少文学修饰，有助于提高三元组提取的准确率。
-
-**示例：**
-
-```text
-# 魔法系统设定
-
-- **魔力源**：来自大气中的以太。
-- **施法者**：必须具备“灵视”天赋。
-
-## 禁忌
-1. 禁止在闹市区施法。
-2. 禁止进行人体炼成。
-```
-
-### 3. 引用文本 (.txt) - `Quote`
-
-适用于无需概括、需要原文背诵或引用的内容。
-
-**最佳实践：**
-
-- **按节分块**：使用**双换行符**分隔不同的段落/小节（Stanza）。每个小节会被作为一个独立的知识块存储。
-- **短行排版**：保留原文的换行格式。
-
-**示例：**
-
-```text
-静夜思
-床前明月光
-疑是地上霜
-
-举头望明月
-低头思故乡
-```
-
----
-
-## LPMM 迁移导入
-
-如果您拥有符合 LPMM (Large Scale Pre-trained Multimodal Model) 规范的 OpenIE JSON 数据 (`*-openie.json`)，可直接迁移。
-
-**文件规范：**
-
-- **格式**：JSON
-- **必需字段**：
-  - `docs`: 列表
-    - `passage`: 原始段落文本
-    - `extracted_triples`: 三元组列表 `[[s, p, o], ...]`
-    - `extracted_entities`: 实体列表 (可选)
-
-**命令：**
+建议先执行：
 
 ```bash
-python plugins/A_memorix/scripts/import_lpmm_json.py <包含json的目录或文件路径>
+python plugins/A_memorix/scripts/runtime_self_check.py --json
 ```
 
-此脚本会自动计算 Hash 并去重，将数据无缝转换到 A_Memorix 的存储格式中。
+再确认：
 
----
+- `storage.data_dir` 路径可写
+- embedding 配置可用
+- 若是升级项目，先完成迁移脚本
 
----
+## 2. 方式 A：脚本导入（推荐起步）
 
-## 4. LPMM 二进制直转 (无需 Token)
+## 2.1 原始文本导入
 
-如果您希望**完全保留** LPMM 的原始 Embedding 向量和图结构，且**不消耗任何 Token**，可以使用直接转换脚本。
+将 `.txt` 文件放入：
 
-> **⚠️ 注意**：这要求 A_memorix 配置的 Embedding 维度与原 LPMM 项目完全一致。
-
-**命令：**
-
-```bash
-python plugins/A_memorix/scripts/convert_lpmm.py --input <LPMM数据目录> --output <A_memorix数据目录>
+```text
+plugins/A_memorix/data/raw/
 ```
 
-**示例：**
-
-Assume LPMM data is in `data/lpmm_storage` and you want to output to `plugins/A_memorix/data`.
-
-```bash
-python plugins/A_memorix/scripts/convert_lpmm.py -i data/lpmm_storage -o plugins/A_memorix/data
-```
-
-此脚本会：
-
-1. 直接读取 `.parquet` 文件并转换为 A_memorix 的二进制向量格式。
-2. 直接读取 `.graphml` 或 `.pkl` 文件并转换为稀疏矩阵图。
-3. 自动重建元数据。
-
-## 常用命令速查
-
-### Web Import 失败重试语义（2026-03）
-
-导入中心的“重试失败项（分块优先）”按钮仍调用：
-
-`POST /api/import/tasks/{task_id}/retry_failed`
-
-但语义已升级为：
-
-1. 优先对 `text` 模式下、失败阶段为 `extracting` 的失败分块做子集重试。
-2. 对写入阶段失败、JSON解析失败或无法安全分块重试的失败项，自动回退为文件级重试。
-3. 在同一个重试子任务中可同时包含“分块重试文件”和“文件回退重试文件”。
-
-接口响应会附带 `retry_summary`，可用于前端展示重试构成统计。
-
-### 时间元数据导入（时序检索）
-
-如果希望后续可按时间窗口（含分钟）精确检索，建议在导入时为段落提供时间字段。
-
-#### 1. `/import json` 支持的段落时间字段
-
-在 `paragraphs[*]` 中可直接传：
-
-- `event_time`
-- `event_time_start`
-- `event_time_end`
-- `time_range`（`[start, end]`）
-- `time_granularity`（可选，未传会自动推断 `day/minute`）
-- `time_confidence`（可选）
-
-示例：
-
-```json
-{
-  "paragraphs": [
-    {
-      "content": "2025年1月1日上午项目例会确定了里程碑。",
-      "event_time_start": "2025/01/01 09:00",
-      "event_time_end": "2025/01/01 10:30",
-      "time_granularity": "minute",
-      "time_confidence": 0.95
-    }
-  ]
-}
-```
-
-#### 2. 脚本导入 (`process_knowledge.py`) 的时间输入
-
-- 脚本在处理 JSON payload 时支持 `paragraphs[*].time_meta`；
-- `time_meta` 可传 timestamp（秒）或时间字符串；
-- 若未提供 `event_time*`，系统仍可回退 `created_at` 参与时序检索（取决于 `retrieval.temporal.allow_created_fallback`）。
-
-#### 3. 查询时间参数（与导入不同）
-
-注意：查询入口（Action/Tool/`/query time`）时间格式更严格，仅接受：
-
-- `YYYY/MM/DD`
-- `YYYY/MM/DD HH:mm`
-
-### 自动导入 (推荐)
-
-将 `.txt` 文件放入 `plugins/A_memorix/data/raw/` 后运行：
+执行：
 
 ```bash
 python plugins/A_memorix/scripts/process_knowledge.py
 ```
 
-_主要参数：_
-
-- `--force`: 强制重新处理所有文件
-- `--type [narrative|factual|quote]`: 强制指定策略（不使用自动检测）
-- `--chat-log`: 聊天记录导入模式。强制使用 narrative 策略，并通过 LLM 语义抽取 `time_meta`（`event_time` 或 `event_time_start/end`）
-- `--chat-reference-time <datetime>`: 聊天记录模式下相对时间参考点（如 `2026/02/12 10:30`）；不传默认当前本地时间
-
-### 清空知识库
-
-如果需要重置所有数据（注意！此操作不可逆！）：
+常用参数：
 
 ```bash
-# 在聊天窗口输入
-/delete clear
+python plugins/A_memorix/scripts/process_knowledge.py --force
+python plugins/A_memorix/scripts/process_knowledge.py --chat-log
+python plugins/A_memorix/scripts/process_knowledge.py --chat-log --chat-reference-time "2026/02/12 10:30"
 ```
 
-或直接删除 `plugins/A_memorix/data/` 下的 `vectors`, `graph`, `metadata` 目录。
+## 2.2 OpenIE JSON 导入
 
----
+```bash
+python plugins/A_memorix/scripts/import_lpmm_json.py <json文件或目录>
+```
 
-## 简单实现示例 (Sample Templates)
+## 2.3 LPMM 数据转换
 
-以下示例可直接复制保存为对应的文件进行测试，或交由LLM进行样例学习
+```bash
+python plugins/A_memorix/scripts/convert_lpmm.py -i <lpmm数据目录> -o plugins/A_memorix/data
+```
 
-### 1. 叙事文本 (`plugins/A_memorix/data/raw/story_demo.txt`)
+## 2.4 历史数据迁移
 
-> 系统会自动识别 `#` 开头的章节，并提取其中的事件脉络。
+```bash
+python plugins/A_memorix/scripts/migrate_chat_history.py --help
+python plugins/A_memorix/scripts/migrate_maibot_memory.py --help
+python plugins/A_memorix/scripts/migrate_person_memory_points.py --help
+```
+
+## 2.5 导入后修复与重建
+
+```bash
+python plugins/A_memorix/scripts/backfill_temporal_metadata.py --dry-run
+python plugins/A_memorix/scripts/backfill_relation_vectors.py --limit 1000
+python plugins/A_memorix/scripts/rebuild_episodes.py --all --wait
+python plugins/A_memorix/scripts/audit_vector_consistency.py --json
+```
+
+## 3. 方式 B：`memory_import_admin` 任务导入
+
+`memory_import_admin` 是在线任务化导入入口，适合宿主侧面板或自动化管道。
+
+### 3.1 常用 action
+
+- `settings` / `get_settings` / `get_guide`
+- `path_aliases` / `get_path_aliases`
+- `resolve_path`
+- `create_upload`
+- `create_paste`
+- `create_raw_scan`
+- `create_lpmm_openie`
+- `create_lpmm_convert`
+- `create_temporal_backfill`
+- `create_maibot_migration`
+- `list`
+- `get`
+- `chunks` / `get_chunks`
+- `cancel`
+- `retry_failed`
+
+### 3.2 调用示例
+
+查看运行时设置：
+
+```json
+{
+  "tool": "memory_import_admin",
+  "arguments": {
+    "action": "settings"
+  }
+}
+```
+
+创建粘贴导入任务：
+
+```json
+{
+  "tool": "memory_import_admin",
+  "arguments": {
+    "action": "create_paste",
+    "content": "今天完成了检索调优回归。",
+    "input_mode": "plain_text",
+    "source": "manual:worklog"
+  }
+}
+```
+
+查询任务列表：
+
+```json
+{
+  "tool": "memory_import_admin",
+  "arguments": {
+    "action": "list",
+    "limit": 20
+  }
+}
+```
+
+查看任务详情：
+
+```json
+{
+  "tool": "memory_import_admin",
+  "arguments": {
+    "action": "get",
+    "task_id": "<task_id>",
+    "include_chunks": true
+  }
+}
+```
+
+重试失败任务：
+
+```json
+{
+  "tool": "memory_import_admin",
+  "arguments": {
+    "action": "retry_failed",
+    "task_id": "<task_id>"
+  }
+}
+```
+
+## 4. 直接写入 Tool（非任务化）
+
+若你不需要任务编排，也可以直接调用：
+
+- `ingest_summary`
+- `ingest_text`
+
+示例：
+
+```json
+{
+  "tool": "ingest_text",
+  "arguments": {
+    "external_id": "note:2026-03-18:001",
+    "source_type": "note",
+    "text": "新的召回阈值方案已通过评审",
+    "chat_id": "group:dev",
+    "tags": ["worklog", "review"]
+  }
+}
+```
+
+`external_id` 建议全局唯一，用于幂等去重。
+
+## 5. 时间字段建议
+
+可用时间字段（按常见优先级）：
+
+- `timestamp`
+- `time_start`
+- `time_end`
+
+建议：
+
+- 事件类记录优先写 `time_start/time_end`
+- 仅有单点时间时写 `timestamp`
+- 历史数据可先导入，再用 `backfill_temporal_metadata.py` 回填
+
+## 6. source_type 建议
+
+常见值：
+
+- `chat_summary`
+- `note`
+- `person_fact`
+- `lpmm_openie`
+- `migration`
+
+建议保持稳定枚举，便于后续按来源治理与重建 Episode。
+
+## 7. 导入完成后的验证
+
+建议执行以下顺序：
+
+1. `memory_stats` 看总量是否增长
+2. `search_memory`（`mode=search`/`aggregate`）抽检召回
+3. `memory_episode_admin` 的 `status`/`query` 检查 Episode 生成
+4. `memory_runtime_admin` 的 `self_check` 再确认运行时健康
+
+## 8. 常见问题
+
+### Q1: 导入任务创建成功但无写入
+
+- 检查聊天过滤配置 `filter`（若 `respect_filter=true` 可能被过滤）
+- 检查任务详情中的失败原因与分块状态
+
+### Q2: 任务反复失败
+
+- 检查 embedding 与 LLM 可用性
+- 降低并发（`web.import.default_*_concurrency`）
+- 调整重试参数（`web.import.llm_retry.*`）
+
+### Q3: 导入后检索效果差
+
+- 先做 `runtime_self_check`
+- 检查 `retrieval.sparse` 是否启用
+- 使用 `memory_tuning_admin` 创建调优任务做参数回归
+
+## 9. 相关文档
+
+- [QUICK_START.md](QUICK_START.md)
+- [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)
+- [README.md](README.md)
+- [CHANGELOG.md](CHANGELOG.md)
+
+## 10. 附录：策略模式参考
+
+A_Memorix 导入链路仍然遵循策略模式（Strategy-Aware）。`process_knowledge.py` 会自动识别文本类型，也支持手动指定。
+
+| 策略类型 | 适用场景 | 核心逻辑 | 自动识别特征 |
+| :-- | :-- | :-- | :-- |
+| `Narrative` (叙事) | 小说、同人文、剧本、长篇故事 | 按场景/章节切分，使用滑动窗口；提取事件与角色关系 | `#`、`Chapter`、`***` 等章节标记 |
+| `Factual` (事实) | 设定集、百科、说明书 | 按语义块切分，保留列表/定义结构；提取 SPO 三元组 | 列表符号、`术语: 解释` |
+| `Quote` (引用) | 歌词、诗歌、名言、台词 | 按双换行切分，原文即知识，不做概括 | 平均行长短、行数多 |
+
+## 11. 附录：参考用例（已恢复）
+
+以下样例可直接复制保存为文件测试，或作为 LLM few-shot 示例。
+
+### 11.1 叙事文本 (`plugins/A_memorix/data/raw/story_demo.txt`)
 
 ```text
 # 第一章：星之子
@@ -380,9 +276,7 @@ _主要参数：_
 “我必须来，”艾瑞克握紧了拳头，“为了解开星盘的秘密，也为了你。”
 ```
 
-### 2. 事实文本 (`plugins/A_memorix/data/raw/rules_demo.txt`)
-
-> 系统会识别列表和定义，提取高精度的 S-P-O 三元组。
+### 11.2 事实文本 (`plugins/A_memorix/data/raw/rules_demo.txt`)
 
 ```text
 # 联邦安全协议 v2.0
@@ -396,9 +290,7 @@ _主要参数：_
 - **黑色障壁**：用于隔离高危 AI 的物理防火墙设施。
 ```
 
-### 3. 引用文本 (`plugins/A_memorix/data/raw/poem_demo.txt`)
-
-> 系统会按双换行符切分，保留原文格式主要用于背诵或咏唱。
+### 11.3 引用文本 (`plugins/A_memorix/data/raw/poem_demo.txt`)
 
 ```text
 致橡树
@@ -417,9 +309,7 @@ _主要参数：_
 增加你的高度，衬托你的威仪。
 ```
 
-### 4. LPMM JSON 数据 (`lpmm_data-openie.json`)
-
-> 符合 LPMM 规范的中间格式。
+### 11.4 LPMM JSON (`lpmm_data-openie.json`)
 
 ```json
 {

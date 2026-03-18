@@ -24,6 +24,20 @@ try:
     from scipy.sparse.linalg import norm
     HAS_SCIPY = True
 except ImportError:
+    class _SparseMatrixPlaceholder:
+        pass
+
+    def _scipy_missing(*args, **kwargs):
+        raise ImportError("SciPy 未安装，请安装: pip install scipy")
+
+    csr_matrix = _SparseMatrixPlaceholder
+    csc_matrix = _SparseMatrixPlaceholder
+    lil_matrix = _SparseMatrixPlaceholder
+    triu = _scipy_missing
+    save_npz = _scipy_missing
+    load_npz = _scipy_missing
+    bmat = _scipy_missing
+    norm = _scipy_missing
     HAS_SCIPY = False
 
 import contextlib

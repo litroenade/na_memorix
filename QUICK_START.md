@@ -1,355 +1,210 @@
-# A_Memorix 快速入门（面向 MaiBot）
+# A_Memorix Quick Start (v2.0.0)
 
-这份文档只做一件事：让你最快把内容导入并把插件跑起来。
+本文档面向当前 `2.0.0` 架构（SDK Tool 接口）。
 
-## 0. 先确认这 4 件事
+## 0. 版本与接口变更
 
-1. 插件目录存在：`plugins/A_memorix/`
-2. 主项目版本满足插件最低要求：`>= 0.12.1`
-3. 你已经配置好 MaiBot 的模型（至少要有可用的 `embedding` 任务模型）
-4. 你在项目根目录执行命令（即 `MaiBot/` 目录），并优先使用主程序的虚拟环境
+- 当前插件版本：`2.0.0`
+- 接口形态：`memory_provider` + Tool 调用
+- 旧版 slash 命令（如 `/query`、`/memory`、`/visualize`）不再作为本分支主文档入口
 
----
+## 1. 环境准备
 
-## 1. 最快路径：批量导入 + 启用插件（推荐）
+- Python 3.10+
+- 与 MaiBot 主程序相同的运行环境
+- 可访问你配置的 embedding 服务
 
-### 第一步：先激活主程序虚拟环境（强烈推荐）
+安装依赖：
 
-根据官方部署文档（Windows / Linux / macOS / Docker），依赖应安装在隔离环境中，不建议直接在系统 Python 全局执行 `pip install`。
-参考：<https://docs.mai-mai.org/manual/deployment/>
-
-推荐做法：在主程序运行所用的同一个虚拟环境里安装 A_Memorix 依赖。
-
-常见激活命令速查（覆盖主流工具）（注意！请根据你的实际使用环境选择命令！）：
-
-#### 1) `venv` / `virtualenv`
-
-```powershell
-# Windows PowerShell
-.\.venv\Scripts\Activate.ps1
-
-# Windows CMD
-.\.venv\Scripts\activate.bat
-
-# Windows Git Bash / MSYS2
-source .venv/Scripts/activate
-
-# Linux / macOS (bash/zsh)
-source .venv/bin/activate
-
-# Linux / macOS (fish)
-source .venv/bin/activate.fish
-
-# Linux / macOS (csh/tcsh)
-source .venv/bin/activate.csh
-```
-
-#### 2) `conda`
-
-```powershell
-# conda
-conda activate <主程序环境名>
-```
-
-#### 3) `uv`（本质仍是 `.venv`）
-
-```powershell
-# 创建环境
-uv venv
-
-# 激活（命令与 venv 相同）
-.\.venv\Scripts\Activate.ps1        # Windows PowerShell
-.\.venv\Scripts\activate.bat        # Windows CMD
-source .venv/bin/activate           # Linux/macOS
-
-# 或不激活，直接用 uv run
-uv run python --version
-```
-
-说明：
-- 若 PowerShell 执行脚本受限，可先执行：`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
-
-激活后执行：
-
-```shell
-pip install -r requirements.txt --upgrade
+```bash
 pip install -r plugins/A_memorix/requirements.txt --upgrade
 ```
 
----
+如果当前目录就是插件目录，也可以：
 
-如果你不是本地虚拟环境部署，再按下列方式执行：
-
-#### A. `uv` 环境（与主程序一致时使用）
-
-```shell
-uv venv
-uv pip install -r requirements.txt --upgrade
-uv pip install -r plugins/A_memorix/requirements.txt --upgrade
+```bash
+pip install -r requirements.txt --upgrade
 ```
 
-#### B. Docker 部署
+## 2. 启用插件
 
-在容器内安装（`core` 服务）：
+在主程序插件配置中启用 `A_Memorix`。
 
-```powershell
-docker compose exec core pip install -r /MaiMBot/plugins/A_memorix/requirements.txt --upgrade
-```
-
-说明：
-- Docker 方案走容器环境，不要在宿主机 Python 上装插件依赖。
-- 官方 Linux 部署文档明确提示：`venv` 和 `uv` 不要混用。
-- 如果你会频繁重建容器，建议把依赖固化到镜像或持久化方案中。
-
-### 第二步：准备要导入的文本
-
-把你的 `.txt` 文件放到：
-
-`plugins/A_memorix/data/raw/`
-
-建议用 UTF-8 编码。
-
-### 第三步：离线批量导入（最快）
-
-按你上一步选择的环境执行：
-
-#### A. 主程序虚拟环境（推荐）
-
-```shell
-python plugins/A_memorix/scripts/process_knowledge.py
-```
-
-#### B. `uv` 环境
-
-```shell
-uv run python plugins/A_memorix/scripts/process_knowledge.py
-```
-
-#### C. Docker 环境
-
-```shell
-docker compose exec core python /MaiMBot/plugins/A_memorix/scripts/process_knowledge.py
-```
-
-常用参数：
-
-```powershell
-# 本地环境（uv/venv/conda）强制重导
-python plugins/A_memorix/scripts/process_knowledge.py --force
-
-# 本地环境聊天记录导入模式（会做时间语义抽取）
-python plugins/A_memorix/scripts/process_knowledge.py --chat-log
-
-# 本地环境聊天记录导入时，指定“相对时间”的参考点
-python plugins/A_memorix/scripts/process_knowledge.py --chat-log --chat-reference-time "2026/02/12 10:30"
-
-# Docker 示例（路径需使用容器内路径）
-docker compose exec core python /MaiMBot/plugins/A_memorix/scripts/process_knowledge.py --force
-```
-
-### 第四步：启用插件
-
-编辑 `plugins/A_memorix/config.toml`，确认：
+若你使用 `plugins/A_memorix/config.toml` 方式，最小示例：
 
 ```toml
 [plugin]
 enabled = true
+
+[storage]
+data_dir = "./data"
+
+[embedding]
+model_name = "auto"
+dimension = 1024
+batch_size = 32
+max_concurrent = 5
+quantization_type = "int8"
 ```
 
-### 第五步：重启 MaiBot
+## 3. 运行时自检（强烈建议）
 
-根据部署方式重启：
+先确认 embedding 实际输出维度与向量库兼容：
 
-- 本地部署（uv/venv/conda）：重启主程序进程
-- Docker：`docker compose restart core`
+```bash
+python plugins/A_memorix/scripts/runtime_self_check.py --json
+```
 
-重启后，插件管理器会扫描 `plugins/` 目录并加载 A_Memorix。
+如果结果 `ok=false`，先修复 embedding 配置或向量库，再继续导入。
 
-### 第六步：验证是否成功
+## 4. 导入数据
 
-在聊天里发送：
+### 4.1 文本批量导入
+
+把文本放到：
 
 ```text
-/query stats
+plugins/A_memorix/data/raw/
 ```
 
-如果看到段落/实体/关系数量，说明插件已生效。
+执行：
 
----
-
-## 2. 不走脚本也能快速导入（聊天命令）
-
-适合临时补充少量内容：
-
-```text
-/import text 原神是一款由米哈游自主研发的...
-/import paragraph 这是一条单段记忆
-/import relation ARC|创建了|A_memorix
-/import file ./劲爆小文件.txt
-/import json {"paragraphs":[{"content":"2026年1月1日项目启动","event_time":"2026/01/01"}]}
+```bash
+python plugins/A_memorix/scripts/process_knowledge.py
 ```
 
-导入后可立刻查询：
+常用参数：
 
-```text
-/query s 游戏
+```bash
+python plugins/A_memorix/scripts/process_knowledge.py --force
+python plugins/A_memorix/scripts/process_knowledge.py --chat-log
+python plugins/A_memorix/scripts/process_knowledge.py --chat-log --chat-reference-time "2026/02/12 10:30"
 ```
 
----
+### 4.2 其他导入脚本
 
-## 3. 查询与可视化（最常用）
-
-### 3.1 语义检索
-
-```text
-/query search 你要找的内容
-# 简写
-/query s 你要找的内容
-```
-
-### 3.2 时间检索（v0.5.0）
-
-```text
-/query time q="项目进展" from=2026/01/01 to="2026/01/31 18:30"
-# 简写
-/query t q=会议 from=2026/02/01 to=2026/02/07
-```
-
-时间格式只支持：
-- `YYYY/MM/DD`
-- `YYYY/MM/DD HH:mm`
-
-### 3.3 人物画像（v0.5.0）
-
-查询人物画像：
-
-```text
-/query person <person_id|别名>
-# 简写
-/query p <person_id|别名>
-```
-
-控制画像注入开关（按当前 `stream_id + user_id`）：
-
-```text
-/person_profile status
-/person_profile on
-/person_profile off
-```
-
-### 3.4 可视化编辑器
-
-```text
-/visualize
-```
-
-默认地址：
-
-`http://localhost:8082`
-
-可在 `plugins/A_memorix/config.toml` 的 `[web]` 里改端口和绑定地址。
-
-### 3.5 Web Import 导入中心（v0.6.0 新增）
-
-在可视化服务启动后，直接访问：
-
-`http://localhost:8082/import`
-
-导入中心支持：
-
-- 上传文件 / 粘贴导入
-- 本地扫描（alias + relative_path）
-- LPMM OpenIE 导入
-- LPMM 二进制转换（staging + switch）
-- 时序回填
-- MaiBot 迁移
-
-并可查看任务/文件/分块三级状态，支持取消与“重试失败项（分块优先）”。
-
----
-
-## 4. 建议你先改的 3 个配置
-
-文件：`plugins/A_memorix/config.toml`
-
-1. `embedding.model_name`
-- 默认 `auto`。
-- 想固定模型时，填你 `model_config.toml` 里可用的模型名。
-
-2. `retrieval.sparse.mode`
-- 默认 `auto`（推荐）。
-- embedding 异常时会自动回退 BM25，稳定性更好。
-
-3. `filter`（聊天流过滤）
-- 默认是白名单模式 `whitelist` 且 `chats=[]`，表示全部放行。
-- 如需只给某些群启用：
-
-```toml
-[filter]
-enabled = true
-mode = "whitelist"
-chats = ["group:123456789"]
-```
-
----
-
-## 5. 运维命令速查
-
-```text
-/query stats                    # 看库状态
-/delete paragraph <hash>        # 删段落
-/delete relation <hash或S|P|O>  # 删关系
-/delete clear                   # 清空知识库（危险）
-/memory status                  # 记忆系统状态
-/memory protect <query> 24      # 保护24小时
-/memory reinforce <query>       # 手动强化
-/person_profile status          # 查看人物画像注入状态
-/person_profile on              # 开启人物画像注入
-/person_profile off             # 关闭人物画像注入
-```
-
----
-
-## 6. 常见问题
-
-### Q1: `/query` 没结果
-
-按顺序检查：
-1. `plugins/A_memorix/config.toml` 里 `[plugin].enabled` 是否为 `true`
-2. 是否已重启 MaiBot
-3. `/query stats` 是否显示段落数量 > 0
-4. embedding 模型是否可用（模型配置是否正确）
-
-### Q2: 批量导入脚本报模型相关错误
-
-原因通常是主项目 `config/model_config.toml` 里没有可用模型或密钥不可用。先让主项目 LLM/embedding 正常，再跑导入脚本。
-
-### Q3: 可视化页面打不开
-
-检查：
-1. `config.toml` 的 `[web].enabled = true`
-2. 端口是否被占用（默认 `8082`）
-3. 用 `/visualize` 触发一次服务启动
-
----
-
-## 7. 进阶导入（可选）
-
-1. LPMM OpenIE JSON 迁移：
-
-```powershell
+```bash
 python plugins/A_memorix/scripts/import_lpmm_json.py <json文件或目录>
-```
-
-2. LPMM 存储直转（尽量不消耗 token）（注意！这一步的维度必须完全相同，否则会出现严重错误）：
-
-```powershell
 python plugins/A_memorix/scripts/convert_lpmm.py -i <lpmm数据目录> -o plugins/A_memorix/data
+python plugins/A_memorix/scripts/migrate_chat_history.py --help
+python plugins/A_memorix/scripts/migrate_maibot_memory.py --help
+python plugins/A_memorix/scripts/migrate_person_memory_points.py --help
 ```
 
-3. 回填旧数据的时间字段：
+## 5. 核心 Tool 调用
 
-```powershell
-python plugins/A_memorix/scripts/backfill_temporal_metadata.py --dry-run
-python plugins/A_memorix/scripts/backfill_temporal_metadata.py --limit 50000
+### 5.1 检索
+
+```json
+{
+  "tool": "search_memory",
+  "arguments": {
+    "query": "项目复盘",
+    "mode": "aggregate",
+    "limit": 5,
+    "chat_id": "group:dev"
+  }
+}
 ```
+
+`mode` 支持：`search/time/hybrid/episode/aggregate`
+
+### 5.2 写入摘要
+
+```json
+{
+  "tool": "ingest_summary",
+  "arguments": {
+    "external_id": "chat_summary:group-dev:2026-03-18",
+    "chat_id": "group:dev",
+    "text": "今天完成了检索调优评审"
+  }
+}
+```
+
+### 5.3 写入普通记忆
+
+```json
+{
+  "tool": "ingest_text",
+  "arguments": {
+    "external_id": "note:2026-03-18:001",
+    "source_type": "note",
+    "text": "模型切换后召回质量更稳定",
+    "chat_id": "group:dev",
+    "tags": ["worklog"]
+  }
+}
+```
+
+### 5.4 画像与维护
+
+```json
+{
+  "tool": "get_person_profile",
+  "arguments": {
+    "person_id": "Alice",
+    "limit": 8
+  }
+}
+```
+
+```json
+{
+  "tool": "maintain_memory",
+  "arguments": {
+    "action": "protect",
+    "target": "模型切换后召回质量更稳定",
+    "hours": 24
+  }
+}
+```
+
+```json
+{
+  "tool": "memory_stats",
+  "arguments": {}
+}
+```
+
+## 6. 管理 Tool（进阶）
+
+`2.0.0` 提供完整管理工具：
+
+- `memory_graph_admin`
+- `memory_source_admin`
+- `memory_episode_admin`
+- `memory_profile_admin`
+- `memory_runtime_admin`
+- `memory_import_admin`
+- `memory_tuning_admin`
+- `memory_v5_admin`
+- `memory_delete_admin`
+
+可先用 `action=list` / `action=status` 等只读动作验证链路。
+
+## 7. 常见问题
+
+### Q1: 检索为空
+
+1. 先看 `memory_stats` 是否有段落/关系
+2. 检查 `chat_id`、`person_id` 过滤条件是否过严
+3. 运行 `runtime_self_check.py --json` 确认 embedding 维度无误
+
+### Q2: 启动时报向量维度不一致
+
+- 原因：现有向量库维度与当前 embedding 输出不一致
+- 处理：恢复原配置或重建向量数据后再启动
+
+### Q3: Web 页面打不开
+
+本分支不内置独立 `server.py`。
+
+- `web/index.html`、`web/import.html`、`web/tuning.html` 由宿主侧路由/API 集成暴露
+- 请检查宿主是否已映射对应静态页与 `/api/*` 接口
+
+## 8. 下一步
+
+- 配置细节见 [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md)
+- 导入细节见 [IMPORT_GUIDE.md](IMPORT_GUIDE.md)
+- 版本历史见 [CHANGELOG.md](CHANGELOG.md)
