@@ -59,6 +59,20 @@ A_Memorix 是面向 MaiBot SDK 的 `memory_provider` 插件。
 | `memory_v5_admin` | `status/recycle_bin/restore/reinforce/weaken/remember_forever/forget` |
 | `memory_delete_admin` | `preview/execute/restore/get_operation/list_operations/purge` |
 
+### 检索模式语义（严格）
+
+- `search_memory.mode` 仅支持：`search/time/hybrid/episode/aggregate`。
+- `semantic` 模式已移除，传入将返回参数错误。
+- `time/hybrid` 模式必须提供 `time_start` 或 `time_end`，否则返回错误，不再静默按“未命中”处理。
+
+### 删除返回语义（source 模式）
+
+- `requested_source_count`：请求删除的 source 数。
+- `matched_source_count`：实际命中的 source 数（存在活跃段落）。
+- `deleted_paragraph_count`：实际删除段落数。
+- `deleted_count`：与实际删除对象一致；在 `source` 模式下等于 `deleted_paragraph_count`。
+- `success`：基于实际命中与实际删除判定，未命中 source 时返回 `false`。
+
 ## 调用示例
 
 ```json

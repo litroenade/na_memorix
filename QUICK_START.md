@@ -109,6 +109,11 @@ python plugins/A_memorix/scripts/migrate_person_memory_points.py --help
 
 `mode` 支持：`search/time/hybrid/episode/aggregate`
 
+严格语义说明：
+
+- `semantic` 模式已移除，传入会返回参数错误。
+- `time/hybrid` 模式必须提供 `time_start` 或 `time_end`，否则返回错误（不会再当作“未命中”）。
+
 ### 5.2 写入摘要
 
 ```json
@@ -190,6 +195,7 @@ python plugins/A_memorix/scripts/migrate_person_memory_points.py --help
 1. 先看 `memory_stats` 是否有段落/关系
 2. 检查 `chat_id`、`person_id` 过滤条件是否过严
 3. 运行 `runtime_self_check.py --json` 确认 embedding 维度无误
+4. 若返回包含 `error` 字段，优先按错误提示修正 mode/时间参数
 
 ### Q2: 启动时报向量维度不一致
 

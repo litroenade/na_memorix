@@ -48,7 +48,7 @@ class SearchExecutionRequest:
     stream_id: Optional[str] = None
     group_id: Optional[str] = None
     user_id: Optional[str] = None
-    query_type: str = "search"  # search|semantic|time|hybrid
+    query_type: str = "search"  # search|time|hybrid
     query: str = ""
     top_k: Optional[int] = None
     time_from: Optional[str] = None
@@ -100,10 +100,7 @@ class SearchExecutionService:
 
     @staticmethod
     def _normalize_query_type(raw_query_type: str) -> str:
-        query_type = _sanitize_text(raw_query_type).lower() or "search"
-        if query_type == "semantic":
-            return "search"
-        return query_type
+        return _sanitize_text(raw_query_type).lower() or "search"
 
     @staticmethod
     def _resolve_runtime_component(

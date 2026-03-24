@@ -75,7 +75,7 @@ class AMemorixPlugin(MaiBotPlugin):
         self,
         query: str = "",
         limit: int = 5,
-        mode: str = "hybrid",
+        mode: str = "search",
         chat_id: str = "",
         person_id: str = "",
         time_start: str | float | None = None,

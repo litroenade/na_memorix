@@ -36,7 +36,7 @@ logger = get_logger("A_Memorix.SDKMemoryKernel")
 class KernelSearchRequest:
     query: str = ""
     limit: int = 5
-    mode: str = "hybrid"
+    mode: str = "search"
     chat_id: str = ""
     person_id: str = ""
     time_start: Optional[str | float] = None
@@ -722,9 +722,19 @@ class SDKMemoryKernel:
         assert self.episode_retriever is not None
         assert self.aggregate_query_service is not None
 
-        mode = str(request.mode or "hybrid").strip().lower() or "hybrid"
+        mode = str(request.mode or "search").strip().lower() or "search"
         query = str(request.query or "").strip()
         limit = max(1, int(request.limit or 5))
+        supported_modes = {"search", "time", "hybrid", "episode", "aggregate"}
+        if mode not in supported_modes:
+            return {
+                "summary": "",
+                "hits": [],
+                "error": (
+                    f"不支持的检索模式: {mode}（仅支持 search/time/hybrid/episode/aggregate，"
+                    "semantic 已移除）"
+                ),
+            }
         try:
             time_window = self._normalize_search_time_window(request.time_start, request.time_end)
         except ValueError as exc:
@@ -760,7 +770,7 @@ class SDKMemoryKernel:
             filtered = self._filter_hits(hits, request.person_id)
             return {"summary": self._summary(filtered), "hits": filtered}
 
-        query_type = "search" if mode in {"search", "semantic"} else mode
+        query_type = mode
         runtime_config = self._build_runtime_config()
         result = await SearchExecutionService.execute(
             retriever=self.retriever,
@@ -2691,7 +2701,13 @@ class SDKMemoryKernel:
         counts = {"relations": 0, "paragraphs": 0, "entities": 0, "sources": 0}
         vector_ids: List[str] = []
         sources: List[str] = []
-        target_hashes: Dict[str, List[str]] = {"relations": [], "paragraphs": [], "entities": [], "sources": []}
+        target_hashes: Dict[str, List[str]] = {
+            "relations": [],
+            "paragraphs": [],
+            "entities": [],
+            "sources": [],
+            "matched_sources": [],
+        }
 
         if act_mode == "relation":
             relation_rows = [row for row in (self.metadata_store.get_relation(hash_value) for hash_value in self._resolve_relation_hashes(str(normalized_selector.get("query", "") or ""))) if row]
@@ -2721,21 +2737,26 @@ class SDKMemoryKernel:
             if act_mode == "source":
                 source_tokens = self._resolve_source_targets(normalized_selector)
                 target_hashes["sources"] = source_tokens
-                counts["sources"] = len(source_tokens)
+                counts["requested_sources"] = len(source_tokens)
+                matched_source_tokens: List[str] = []
                 for source in source_tokens:
-                    sources.append(source)
-                    paragraph_rows.extend(
-                        self.metadata_store.query(
-                            """
-                            SELECT *
-                            FROM paragraphs
-                            WHERE source = ?
-                              AND (is_deleted IS NULL OR is_deleted = 0)
-                            ORDER BY created_at ASC
-                            """,
-                            (source,),
-                        )
+                    source_rows = self.metadata_store.query(
+                        """
+                        SELECT *
+                        FROM paragraphs
+                        WHERE source = ?
+                          AND (is_deleted IS NULL OR is_deleted = 0)
+                        ORDER BY created_at ASC
+                        """,
+                        (source,),
                     )
+                    if source_rows:
+                        matched_source_tokens.append(source)
+                        sources.append(source)
+                        paragraph_rows.extend(source_rows)
+                target_hashes["matched_sources"] = matched_source_tokens
+                counts["sources"] = len(matched_source_tokens)
+                counts["matched_sources"] = len(matched_source_tokens)
             else:
                 paragraph_rows = self._resolve_paragraph_targets(normalized_selector, include_deleted=False)
             paragraph_hashes = self._tokens([row.get("hash", "") for row in paragraph_rows])
@@ -2797,9 +2818,14 @@ class SDKMemoryKernel:
 
         sources = self._tokens(sources)
         vector_ids = self._tokens(vector_ids)
-        primary_count = counts.get(f"{act_mode}s", 0) if act_mode != "source" else counts.get("sources", 0)
+        primary_count = counts.get(f"{act_mode}s", 0) if act_mode != "source" else counts.get("matched_sources", 0)
+        success = (
+            primary_count > 0 or counts.get("paragraphs", 0) > 0 or counts.get("relations", 0) > 0
+            if act_mode != "source"
+            else (counts.get("matched_sources", 0) > 0 and counts.get("paragraphs", 0) > 0)
+        )
         return {
-            "success": primary_count > 0 or counts.get("paragraphs", 0) > 0 or counts.get("relations", 0) > 0,
+            "success": success,
             "mode": act_mode,
             "selector": normalized_selector,
             "items": items,
@@ -2807,7 +2833,9 @@ class SDKMemoryKernel:
             "vector_ids": vector_ids,
             "sources": sources,
             "target_hashes": target_hashes,
-            "error": "" if (primary_count > 0 or counts.get("paragraphs", 0) > 0 or counts.get("relations", 0) > 0) else "未命中可删除内容",
+            "requested_source_count": counts.get("requested_sources", 0) if act_mode == "source" else 0,
+            "matched_source_count": counts.get("matched_sources", 0) if act_mode == "source" else 0,
+            "error": "" if success else "未命中可删除内容",
         }
 
     async def _preview_delete_action(self, *, mode: str, selector: Any) -> Dict[str, Any]:
@@ -2826,6 +2854,8 @@ class SDKMemoryKernel:
             "mode": plan.get("mode"),
             "selector": plan.get("selector"),
             "counts": plan.get("counts", {}),
+            "requested_source_count": int(plan.get("requested_source_count", 0) or 0),
+            "matched_source_count": int(plan.get("matched_source_count", 0) or 0),
             "sources": plan.get("sources", []),
             "vector_ids": plan.get("vector_ids", []),
             "items": preview_items,
@@ -2852,7 +2882,8 @@ class SDKMemoryKernel:
         paragraph_hashes = self._tokens((plan.get("target_hashes") or {}).get("paragraphs"))
         entity_hashes = self._tokens((plan.get("target_hashes") or {}).get("entities"))
         relation_hashes = self._tokens((plan.get("target_hashes") or {}).get("relations"))
-        source_tokens = self._tokens((plan.get("target_hashes") or {}).get("sources"))
+        requested_source_tokens = self._tokens((plan.get("target_hashes") or {}).get("sources"))
+        matched_source_tokens = self._tokens((plan.get("target_hashes") or {}).get("matched_sources"))
 
         try:
             if paragraph_hashes:
@@ -2866,8 +2897,8 @@ class SDKMemoryKernel:
                     tuple(paragraph_hashes),
                 )
                 self.metadata_store.delete_external_memory_refs_by_paragraphs(paragraph_hashes)
-            if act_mode == "source" and source_tokens:
-                for source in source_tokens:
+            if act_mode == "source" and matched_source_tokens:
+                for source in matched_source_tokens:
                     self.metadata_store.replace_episodes_for_source(source, [])
 
             if entity_hashes:
@@ -2903,7 +2934,7 @@ class SDKMemoryKernel:
             self._rebuild_graph_from_metadata()
             self._persist()
             deleted_count = (
-                len(source_tokens)
+                len(paragraph_hashes)
                 if act_mode == "source"
                 else len(paragraph_hashes)
                 if act_mode == "paragraph"
@@ -2911,8 +2942,9 @@ class SDKMemoryKernel:
                 if act_mode == "entity"
                 else len(relation_hashes)
             )
+            success = bool(deleted_count > 0)
             result = {
-                "success": True,
+                "success": success,
                 "mode": act_mode,
                 "operation_id": operation.get("operation_id", ""),
                 "counts": plan.get("counts", {}),
@@ -2922,8 +2954,12 @@ class SDKMemoryKernel:
                 "deleted_relation_count": len(relation_hashes),
             }
             if act_mode == "source":
-                result["deleted_source_count"] = len(source_tokens)
+                result["requested_source_count"] = len(requested_source_tokens)
+                result["matched_source_count"] = len(matched_source_tokens)
+                result["deleted_source_count"] = len(matched_source_tokens)
                 result["deleted_paragraph_count"] = len(paragraph_hashes)
+                if not success:
+                    result["error"] = "未命中可删除内容"
             return result
         except Exception as exc:
             conn.rollback()
