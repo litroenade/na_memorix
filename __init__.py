@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from importlib import import_module
 from types import ModuleType
+from typing import Any
 
 __version__ = "0.7.0"
 __author__ = "KroMiose"
@@ -29,7 +30,12 @@ def _ensure_aliases() -> tuple[ModuleType, ModuleType]:
     return amemorix_pkg, core_pkg
 
 
-def __getattr__(name: str):
+# 显式绑定插件实例，避免包属性 ``plugin`` 被同名子模块覆盖成 module 对象。
+_AMEMORIX_PKG, _CORE_PKG = _ensure_aliases()
+plugin = import_module(f"{__name__}.plugin").plugin
+
+
+def __getattr__(name: str) -> Any:
     """按需暴露插件入口与兼容子包。
 
     Args:
@@ -42,13 +48,12 @@ def __getattr__(name: str):
         AttributeError: 当请求的属性不存在时抛出。
     """
     if name == "plugin":
-        _ensure_aliases()
-        return import_module(f"{__name__}.plugin").plugin
+        return plugin
     if name == "amemorix":
-        return _ensure_aliases()[0]
+        return _AMEMORIX_PKG
     if name == "core":
-        return _ensure_aliases()[1]
+        return _CORE_PKG
     raise AttributeError(name)
 
 
-__all__ = ["plugin", "__version__", "__author__"]
+__all__ = ["plugin", "__version__", "__author__", "amemorix", "core"]
