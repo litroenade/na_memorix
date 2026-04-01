@@ -46,53 +46,332 @@ plugin = NekroPlugin(
 )
 
 
+def _config_extra(
+    *,
+    category_zh: str,
+    category_en: str,
+    title_zh: str,
+    title_en: str,
+    description_zh: str,
+    description_en: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """生成带有 Nekro WebUI 元数据的配置字段扩展定义。"""
+
+    return ExtraField(
+        i18n_category=i18n.i18n_text(
+            zh_CN=category_zh,
+            en_US=category_en,
+        ),
+        i18n_title=i18n.i18n_text(
+            zh_CN=title_zh,
+            en_US=title_en,
+        ),
+        i18n_description=i18n.i18n_text(
+            zh_CN=description_zh,
+            en_US=description_en,
+        ),
+        **kwargs,
+    ).model_dump()
+
+
+def _config_field(
+    default: Any,
+    *,
+    category_zh: str,
+    category_en: str,
+    title_zh: str,
+    title_en: str,
+    description_zh: str,
+    description_en: str,
+    extra_kwargs: Optional[dict[str, Any]] = None,
+    **field_kwargs: Any,
+) -> Any:
+    """生成符合 Nekro 配置面板风格的字段定义。"""
+
+    return Field(
+        default=default,
+        title=title_zh,
+        description=description_zh,
+        json_schema_extra=_config_extra(
+            category_zh=category_zh,
+            category_en=category_en,
+            title_zh=title_zh,
+            title_en=title_en,
+            description_zh=description_zh,
+            description_en=description_en,
+            **(extra_kwargs or {}),
+        ),
+        **field_kwargs,
+    )
+
+
 @plugin.mount_config()
 class NaMemorixConfig(ConfigBase):
-    """插件配置面。"""
+    """na_memorix 插件配置面。"""
 
-    GLOBAL_MEMORY_ENABLED: bool = Field(
-        default=True,
-        title="全局记忆开关",
-        json_schema_extra=ExtraField(
-            i18n_title=i18n.i18n_text(zh_CN="全局记忆开关", en_US="Global Memory Switch"),
-            i18n_description=i18n.i18n_text(
-                zh_CN="关闭后暂停自动注入和后台维护，但仍可手动查看与搜索记忆。",
-                en_US="Disables auto injection and background maintenance while keeping manual browsing and search available.",
-            ),
-        ).model_dump(),
+    GLOBAL_MEMORY_ENABLED: bool = _config_field(
+        True,
+        category_zh="基础开关",
+        category_en="General",
+        title_zh="启用全局记忆",
+        title_en="Enable Global Memory",
+        description_zh="关闭后会暂停自动注入、人物画像刷新与后台维护，但仍可手动导入、检索和查看记忆。",
+        description_en="Disables auto injection, profile refresh, and background maintenance while keeping manual import, search, and browsing available.",
     )
-    AUTO_INJECT_ENABLED: bool = Field(default=True, title="自动注入记忆")
-    AUTO_INJECT_TOP_K: int = Field(default=6, ge=1, le=20, title="自动注入 Top-K")
-    AUTO_INJECT_MIN_SCORE: float = Field(default=0.32, ge=0.0, le=1.0, title="自动注入最低分数")
-    CHAT_FILTER_ENABLED: bool = Field(default=False, title="启用聊天过滤")
-    CHAT_FILTER_MODE: Literal["whitelist", "blacklist"] = Field(default="whitelist", title="聊天过滤模式")
-    CHAT_FILTER_CHATS: str = Field(
-        default="",
-        title="聊天过滤列表",
-        description="每行一个 chat key，支持 stream:/group:/user: 前缀。",
+    AUTO_INJECT_ENABLED: bool = _config_field(
+        True,
+        category_zh="自动注入",
+        category_en="Auto Injection",
+        title_zh="启用自动记忆注入",
+        title_en="Enable Auto Memory Injection",
+        description_zh="在对话处理中自动检索相关记忆并注入上下文，关闭后只保留手动搜索与导入能力。",
+        description_en="Automatically retrieves related memories during conversations and injects them into context. When disabled, only manual search and import remain available.",
     )
-    EMBEDDING_MODEL_GROUP: str = Field(default="text-embedding", title="Embedding 模型组")
-    EMBEDDING_DIMENSION: int = Field(
-        default=int(getattr(app_config, "MEMORY_EMBEDDING_DIMENSION", 1024) or 1024),
+    AUTO_INJECT_TOP_K: int = _config_field(
+        6,
+        category_zh="自动注入",
+        category_en="Auto Injection",
+        title_zh="自动注入召回数量",
+        title_en="Auto Injection Top K",
+        description_zh="每次自动注入时，最多保留多少条候选记忆写入上下文。",
+        description_en="Maximum number of recalled memory candidates kept for each automatic injection.",
         ge=1,
-        title="Embedding 维度",
+        le=20,
     )
-    EMBEDDING_TIMEOUT_SECONDS: int = Field(default=30, ge=5, le=600, title="Embedding 超时秒数")
-    SUMMARIZATION_MODEL_GROUP: str = Field(default="default", title="总结模型组")
-    SUMMARIZATION_CONTEXT_LENGTH: int = Field(default=50, ge=4, le=200, title="总结上下文长度")
-    PERSON_PROFILE_ENABLED: bool = Field(default=True, title="启用人物画像")
-    PERSON_PROFILE_TTL_MINUTES: int = Field(default=360, ge=10, title="人物画像缓存时间")
-    PERSON_PROFILE_REFRESH_INTERVAL_MINUTES: int = Field(default=30, ge=1, title="人物画像刷新周期")
-    WEB_READ_ONLY: bool = Field(default=False, title="前端只读模式")
-    TOP_K_PARAGRAPHS: int = Field(default=20, ge=1, le=200, title="段落召回数量")
-    TOP_K_RELATIONS: int = Field(default=10, ge=1, le=200, title="关系召回数量")
-    TOP_K_FINAL: int = Field(default=10, ge=1, le=100, title="最终结果数量")
-    RETRIEVAL_ALPHA: float = Field(default=0.5, ge=0.0, le=1.0, title="向量/关系融合权重")
-    SPARSE_ENABLED: bool = Field(default=True, title="启用稀疏检索")
-    CHUNK_COLLECTION_NAME: str = Field(default="na_memorix_chunks", title="Qdrant 段落集合名")
-    RELATION_COLLECTION_NAME: str = Field(default="na_memorix_relations", title="Qdrant 关系集合名")
-    TABLE_PREFIX: str = Field(default="na_memorix", title="PostgreSQL 表前缀")
-    AUTO_SAVE_INTERVAL_MINUTES: int = Field(default=5, ge=1, title="自动保存周期")
+    AUTO_INJECT_MIN_SCORE: float = _config_field(
+        0.32,
+        category_zh="自动注入",
+        category_en="Auto Injection",
+        title_zh="自动注入最低分数",
+        title_en="Auto Injection Minimum Score",
+        description_zh="自动注入时仅保留相似度不低于该阈值的候选记忆。",
+        description_en="Only memory candidates with similarity scores above this threshold will be injected automatically.",
+        ge=0.0,
+        le=1.0,
+    )
+    CHAT_FILTER_ENABLED: bool = _config_field(
+        False,
+        category_zh="聊天过滤",
+        category_en="Chat Filter",
+        title_zh="启用聊天过滤",
+        title_en="Enable Chat Filtering",
+        description_zh="启用后，可通过白名单或黑名单限制插件仅在指定聊天内生效。",
+        description_en="When enabled, the plugin can be limited to specific chats through whitelist or blacklist mode.",
+    )
+    CHAT_FILTER_MODE: Literal["whitelist", "blacklist"] = _config_field(
+        "whitelist",
+        category_zh="聊天过滤",
+        category_en="Chat Filter",
+        title_zh="聊天过滤模式",
+        title_en="Chat Filter Mode",
+        description_zh="白名单模式只允许列表中的聊天使用，黑名单模式则会排除列表中的聊天。",
+        description_en="Whitelist mode only allows configured chats, while blacklist mode excludes the configured chats.",
+    )
+    CHAT_FILTER_CHATS: str = _config_field(
+        "",
+        category_zh="聊天过滤",
+        category_en="Chat Filter",
+        title_zh="聊天过滤列表",
+        title_en="Chat Filter List",
+        description_zh="每行一个 chat key，支持填写 stream:/group:/user: 前缀，用于限定插件在哪些聊天中工作。",
+        description_en="One chat key per line. Supports stream:/group:/user: prefixes to control which chats the plugin applies to.",
+        extra_kwargs={
+            "is_textarea": True,
+            "placeholder": "stream:public\ngroup:123456\nuser:admin",
+        },
+    )
+    EMBEDDING_MODEL_GROUP: str = _config_field(
+        "text-embedding",
+        category_zh="模型配置",
+        category_en="Model Configuration",
+        title_zh="记忆 Embedding 模型组",
+        title_en="Memory Embedding Model Group",
+        description_zh="用于向量化段落与关系的 Embedding 模型组，应选择系统内 MODEL_TYPE 为 embedding 的模型组，并与下方维度保持一致。",
+        description_en="Embedding model group used to vectorize chunks and relations. It should use a model group with MODEL_TYPE set to embedding and match the dimension below.",
+        extra_kwargs={
+            "ref_model_groups": True,
+            "model_type": "embedding",
+            "placeholder": "text-embedding",
+        },
+    )
+    EMBEDDING_DIMENSION: int = _config_field(
+        int(getattr(app_config, "MEMORY_EMBEDDING_DIMENSION", 1024) or 1024),
+        category_zh="模型配置",
+        category_en="Model Configuration",
+        title_zh="记忆 Embedding 维度",
+        title_en="Memory Embedding Dimension",
+        description_zh="向量维度需要与所选 Embedding 模型输出以及既有 Qdrant 索引保持一致。",
+        description_en="The vector dimension must match both the selected embedding model output and the existing Qdrant index.",
+        ge=1,
+    )
+    EMBEDDING_TIMEOUT_SECONDS: int = _config_field(
+        30,
+        category_zh="模型配置",
+        category_en="Model Configuration",
+        title_zh="Embedding 超时（秒）",
+        title_en="Embedding Timeout (s)",
+        description_zh="单次 Embedding 请求的超时时间，模型响应较慢时可适当调大。",
+        description_en="Timeout for a single embedding request. Increase it if the model responds slowly.",
+        ge=5,
+        le=600,
+    )
+    SUMMARIZATION_MODEL_GROUP: str = _config_field(
+        "default",
+        category_zh="模型配置",
+        category_en="Model Configuration",
+        title_zh="记忆总结模型组",
+        title_en="Memory Summarization Model Group",
+        description_zh="用于总结近期对话并写入长期记忆的聊天模型组。",
+        description_en="Chat model group used to summarize recent conversations into long-term memory.",
+        extra_kwargs={
+            "ref_model_groups": True,
+            "model_type": "chat",
+            "placeholder": "default",
+        },
+    )
+    SUMMARIZATION_CONTEXT_LENGTH: int = _config_field(
+        50,
+        category_zh="模型配置",
+        category_en="Model Configuration",
+        title_zh="总结上下文长度",
+        title_en="Summarization Context Length",
+        description_zh="每次总结时回看最近多少条聊天消息；越大越完整，但模型开销也越高。",
+        description_en="How many recent chat messages are included in each summary. Larger values provide more context but increase model cost.",
+        ge=4,
+        le=200,
+    )
+    PERSON_PROFILE_ENABLED: bool = _config_field(
+        True,
+        category_zh="人物画像",
+        category_en="Person Profiles",
+        title_zh="启用人物画像",
+        title_en="Enable Person Profiles",
+        description_zh="启用后会为活跃用户维护人物画像，并在检索与理解上下文时提供辅助信息。",
+        description_en="Maintains person profiles for active users and uses them to assist retrieval and context understanding.",
+    )
+    PERSON_PROFILE_TTL_MINUTES: int = _config_field(
+        360,
+        category_zh="人物画像",
+        category_en="Person Profiles",
+        title_zh="人物画像缓存时间（分钟）",
+        title_en="Profile Cache TTL (min)",
+        description_zh="人物画像缓存的保留时长，超过该时长后会重新生成或刷新。",
+        description_en="How long person profiles remain cached before they are regenerated or refreshed.",
+        ge=10,
+    )
+    PERSON_PROFILE_REFRESH_INTERVAL_MINUTES: int = _config_field(
+        30,
+        category_zh="人物画像",
+        category_en="Person Profiles",
+        title_zh="人物画像刷新周期（分钟）",
+        title_en="Profile Refresh Interval (min)",
+        description_zh="后台刷新人物画像的最小间隔，用于避免过于频繁地重复生成。",
+        description_en="Minimum interval between background profile refreshes to avoid regenerating profiles too often.",
+        ge=1,
+    )
+    WEB_READ_ONLY: bool = _config_field(
+        False,
+        category_zh="Web 面板",
+        category_en="Web Panel",
+        title_zh="Web 面板只读模式",
+        title_en="Web Panel Read-only Mode",
+        description_zh="启用后，前端面板仅允许查看记忆数据，禁止写入和修改操作。",
+        description_en="When enabled, the web panel becomes read-only and disallows write or edit operations.",
+    )
+    TOP_K_PARAGRAPHS: int = _config_field(
+        20,
+        category_zh="检索配置",
+        category_en="Retrieval",
+        title_zh="段落召回数量",
+        title_en="Paragraph Recall Count",
+        description_zh="检索阶段先从段落索引中召回的候选数量。",
+        description_en="Number of paragraph candidates recalled from the chunk index during retrieval.",
+        ge=1,
+        le=200,
+    )
+    TOP_K_RELATIONS: int = _config_field(
+        10,
+        category_zh="检索配置",
+        category_en="Retrieval",
+        title_zh="关系召回数量",
+        title_en="Relation Recall Count",
+        description_zh="检索阶段先从关系索引中召回的候选数量。",
+        description_en="Number of relation candidates recalled from the relation index during retrieval.",
+        ge=1,
+        le=200,
+    )
+    TOP_K_FINAL: int = _config_field(
+        10,
+        category_zh="检索配置",
+        category_en="Retrieval",
+        title_zh="最终结果数量",
+        title_en="Final Result Count",
+        description_zh="融合排序完成后最终返回给插件和前端的结果条数。",
+        description_en="Number of final results returned to the plugin and frontend after fusion ranking.",
+        ge=1,
+        le=100,
+    )
+    RETRIEVAL_ALPHA: float = _config_field(
+        0.5,
+        category_zh="检索配置",
+        category_en="Retrieval",
+        title_zh="向量/关系融合权重",
+        title_en="Vector/Relation Fusion Weight",
+        description_zh="控制向量检索与关系检索的融合权重；越接近 1 越偏向向量结果。",
+        description_en="Controls the fusion weight between vector retrieval and relation retrieval. Values closer to 1 favor vector results.",
+        ge=0.0,
+        le=1.0,
+    )
+    SPARSE_ENABLED: bool = _config_field(
+        True,
+        category_zh="检索配置",
+        category_en="Retrieval",
+        title_zh="启用稀疏检索",
+        title_en="Enable Sparse Retrieval",
+        description_zh="启用后会同时使用稀疏检索辅助召回，通常能改善关键词类查询效果。",
+        description_en="Enables sparse retrieval alongside vector retrieval, which usually improves keyword-oriented queries.",
+    )
+    CHUNK_COLLECTION_NAME: str = _config_field(
+        "na_memorix_chunks",
+        category_zh="存储配置",
+        category_en="Storage",
+        title_zh="Qdrant 段落集合名",
+        title_en="Qdrant Chunk Collection Name",
+        description_zh="Qdrant 中用于存储段落向量的集合名。修改后会切换到新的段落索引。",
+        description_en="Name of the Qdrant collection used for chunk vectors. Changing it switches the plugin to a different chunk index.",
+        extra_kwargs={"placeholder": "na_memorix_chunks"},
+    )
+    RELATION_COLLECTION_NAME: str = _config_field(
+        "na_memorix_relations",
+        category_zh="存储配置",
+        category_en="Storage",
+        title_zh="Qdrant 关系集合名",
+        title_en="Qdrant Relation Collection Name",
+        description_zh="Qdrant 中用于存储关系向量的集合名。修改后会切换到新的关系索引。",
+        description_en="Name of the Qdrant collection used for relation vectors. Changing it switches the plugin to a different relation index.",
+        extra_kwargs={"placeholder": "na_memorix_relations"},
+    )
+    TABLE_PREFIX: str = _config_field(
+        "na_memorix",
+        category_zh="存储配置",
+        category_en="Storage",
+        title_zh="PostgreSQL 表前缀",
+        title_en="PostgreSQL Table Prefix",
+        description_zh="PostgreSQL 存储表前缀。变更后会使用另一套数据表，通常只建议在初始化阶段调整。",
+        description_en="Prefix used for PostgreSQL tables. Changing it switches the plugin to a different set of tables and is usually only recommended during initial setup.",
+        extra_kwargs={"placeholder": "na_memorix"},
+    )
+    AUTO_SAVE_INTERVAL_MINUTES: int = _config_field(
+        5,
+        category_zh="存储配置",
+        category_en="Storage",
+        title_zh="自动保存周期（分钟）",
+        title_en="Auto Save Interval (min)",
+        description_zh="后台自动保存运行时状态与缓存的周期，单位为分钟。",
+        description_en="Interval in minutes for automatically saving runtime state and caches in the background.",
+        ge=1,
+    )
 
 
 @dataclass(frozen=True)
