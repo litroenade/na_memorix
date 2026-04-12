@@ -1543,8 +1543,8 @@ class MemorixServer:
                     "retrieval_tuning_backend": False,
                 },
                 "messages": {
-                    "import_backend": "已完成宿主适配，导入中心功能后端暂未接入。",
-                    "retrieval_tuning_backend": "已完成宿主适配，检索调优功能后端暂未接入。",
+                    "import_backend": "宿主导入后端暂未接入，导入页已切换为兼容说明模式；基础异步导入可改用 /v1/import/tasks。",
+                    "retrieval_tuning_backend": "宿主检索调优后端暂未接入，调优页已切换为兼容说明模式。",
                 },
                 "web_read_only": bool(self.plugin.get_config("web.read_only", False)),
             }

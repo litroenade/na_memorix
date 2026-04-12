@@ -430,6 +430,48 @@
       .feature-banner.show {
         display: block;
       }
+      .compat-shell[hidden] {
+        display: none;
+      }
+      .compat-stack {
+        display: grid;
+        gap: 12px;
+      }
+      .compat-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px;
+      }
+      .compat-item {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #0f172a;
+      }
+      .compat-item h3 {
+        margin: 0 0 6px;
+        font-size: 14px;
+        color: var(--text);
+      }
+      .compat-item p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+      .compat-code {
+        margin: 0;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #0f172a;
+        color: var(--text);
+        font-family: Consolas, Menlo, Monaco, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.6;
+      }
       .btn[disabled] {
         opacity: 0.55;
         cursor: not-allowed;
@@ -480,7 +522,7 @@
       <div class="top">
         <div>
           <div class="title">A_Memorix 导入中心</div>
-          <div class="sub">可控并发、部分文件导入、粘贴导入、分块级进度</div>
+          <div class="sub" id="page-subtitle">宿主导入兼容页；只有在 import_backend 接入后才会恢复旧版 Web 导入工作台</div>
         </div>
         <div class="top-mid">
           <button class="btn" id="guide-open" type="button">
@@ -498,7 +540,7 @@
             type="button"
             onclick="window.open(pageUrl('tuning'), '_blank')"
           >
-            检索调优
+            检索调优兼容页
           </button>
         </div>
         <div class="token">
@@ -512,8 +554,29 @@
         </div>
       </div>
       <div id="feature-banner" class="feature-banner" data-level="warn"></div>
+      <div id="compat-shell" class="compat-shell" hidden>
+        <div class="compat-stack">
+          <div class="card">
+            <div class="hd">兼容页状态</div>
+            <div class="bd">
+              <div class="tiny" id="compat-status-text"></div>
+              <div class="compat-grid" id="compat-supported-modes" style="margin-top: 10px"></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="hd">当前仍可用的导入入口</div>
+            <div class="bd">
+              <div class="tiny" style="margin-bottom: 8px">
+                当前插件真正可用的是宿主根路径下的 <code>/v1/import/tasks</code> 异步任务接口。
+                旧版 Web 导入台依赖的 <code>/api/import/*</code> 桥接后端尚未挂载，所以页面已切换为兼容说明模式。
+              </div>
+              <pre id="compat-request-example" class="compat-code"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
 
-      <div class="grid">
+      <div class="grid" id="import-workbench">
         <div>
           <div class="card">
             <div class="hd">创建导入任务</div>
@@ -896,6 +959,42 @@
         pollErrAt: 0,
         capabilities: null,
       };
+      const IMPORT_COMPAT_GUIDE = `# 导入中心兼容页
+
+当前宿主还没有挂载旧版 Web 导入台依赖的 \`/api/import/*\` 桥接接口，所以此页面会自动切换成兼容说明模式。
+
+## 现在真实可用的入口
+
+- 根路径异步任务接口：\`POST /v1/import/tasks\`
+- 单任务查询：\`GET /v1/import/tasks/{task_id}\`
+
+## 当前 ImportService 支持的 mode
+
+- \`text\`：把整段文本按段落拆分后导入
+- \`paragraph\`：导入单条段落记录，可带 \`source\` / \`time_meta\`
+- \`relation\`：导入单条关系，支持 \`subject\` / \`predicate\` / \`object\`
+- \`json\`：导入 paragraphs/relations 结构化 JSON
+- \`file\`：按文件路径导入 \`.txt\` / \`.md\` / \`.json\`
+
+## 为什么旧表单现在不可用
+
+上传、本地扫描、OpenIE、时序回填、任务队列、文件级状态、分块级状态这些面板，依赖的是旧版 \`/api/import/*\` Web 桥接层，而不是当前已经接入的 \`/v1/import/tasks\`。
+
+后续如果宿主补齐对应桥接后端，这个页面会自动恢复成旧版工作台。`;
+      const IMPORT_COMPAT_REQUEST_EXAMPLE = `POST /v1/import/tasks
+Content-Type: application/json
+
+{
+  "mode": "paragraph",
+  "payload": {
+    "content": "张三于 2025 年加入 Nekro Agent 项目。",
+    "source": "web_compat_example",
+    "time_meta": {
+      "event_time": "2025-01-01T00:00:00"
+    }
+  },
+  "options": {}
+}`;
       const $ = (id) => document.getElementById(id);
       const esc = (s) =>
         String(s ?? "")
@@ -1064,8 +1163,51 @@
         banner.textContent = "";
         banner.classList.remove("show");
       }
+      function setCompatMode(enabled) {
+        const shell = $("compat-shell");
+        const workbench = $("import-workbench");
+        if (shell) shell.hidden = !enabled;
+        if (workbench) workbench.style.display = enabled ? "none" : "";
+      }
+      function renderImportCompatShell(message) {
+        const statusEl = $("compat-status-text");
+        const modesEl = $("compat-supported-modes");
+        const exampleEl = $("compat-request-example");
+        const subtitleEl = $("page-subtitle");
+        if (subtitleEl) {
+          subtitleEl.textContent = hasImportBackend()
+            ? "旧版 Web 导入工作台已接入，可在当前页面执行上传、扫描和任务查看。"
+            : "宿主导入兼容页；当前只展示真实可用入口与接入说明，不再暴露旧版无后端承接的任务面板。";
+        }
+        if (statusEl) {
+          statusEl.textContent = `${message} 当前页面不会再展示旧版上传、本地扫描、OpenIE、回填和任务队列壳面板。`;
+        }
+        if (modesEl) {
+          modesEl.innerHTML = [
+            ["text", "整段文本导入，服务端会自动分段。"],
+            ["paragraph", "单条段落导入，可显式带 source 与 time_meta。"],
+            ["relation", "单条关系导入，字段为 subject / predicate / object。"],
+            ["json", "结构化导入 paragraphs / relations JSON。"],
+            ["file", "按文件路径导入 .txt / .md / .json。"],
+          ]
+            .map(
+              ([mode, desc]) => `
+                <article class="compat-item">
+                  <h3>${esc(mode)}</h3>
+                  <p>${esc(desc)}</p>
+                </article>
+              `,
+            )
+            .join("");
+        }
+        if (exampleEl) {
+          exampleEl.textContent = IMPORT_COMPAT_REQUEST_EXAMPLE;
+        }
+      }
       function renderBackendUnavailable(message) {
         const text = esc(message);
+        setCompatMode(true);
+        renderImportCompatShell(message);
         ["tasks-running", "tasks-queued", "tasks-recent"].forEach((id) => {
           if ($(id)) $(id).innerHTML = `<div class="tiny">${text}</div>`;
         });
@@ -1083,7 +1225,6 @@
       }
       function applyFeatureAvailability() {
         const disabledIds = [
-          "guide-open",
           "upload-submit",
           "paste-submit",
           "raw-submit",
@@ -1096,6 +1237,8 @@
         if (hasImportBackend()) {
           hideFeatureBanner();
           setDisabled(disabledIds, false);
+          setCompatMode(false);
+          renderImportCompatShell("");
           return;
         }
         const message =
@@ -1168,6 +1311,11 @@
         $("guide-modal").classList.add("show");
         $("guide-meta").textContent = "";
         $("guide-body").innerHTML = `<p class="tiny">正在加载文档...</p>`;
+        if (!hasImportBackend()) {
+          $("guide-meta").textContent = "来源: 兼容页内置说明";
+          $("guide-body").innerHTML = renderGuideMarkdown(IMPORT_COMPAT_GUIDE);
+          return;
+        }
         try {
           const d = await req("/api/import/guide", { headers: headers(false) });
           const srcText = d.source === "remote" ? "远程" : "本地";
