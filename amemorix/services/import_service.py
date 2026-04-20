@@ -69,6 +69,7 @@ class ImportService:
         source: str = "v1_import",
         knowledge_type: str = "",
         time_meta: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         text = str(content or "").strip()
         if not text:
@@ -82,6 +83,7 @@ class ImportService:
         hash_value = self.ctx.metadata_store.add_paragraph(
             content=text,
             source=source,
+            metadata=metadata or {},
             knowledge_type=resolved_kt if resolved_kt else KnowledgeType.MIXED.value,
             time_meta=normalize_time_meta(time_meta or {}),
         )
@@ -109,6 +111,7 @@ class ImportService:
         obj: str,
         confidence: float = 1.0,
         source_paragraph: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         s = str(subject or "").strip()
         p = str(predicate or "").strip()
@@ -123,6 +126,7 @@ class ImportService:
             obj=o,
             confidence=float(confidence),
             source_paragraph=source_paragraph,
+            metadata=metadata or {},
         )
         self.ctx.graph_store.add_edges([(s, o)], weights=[float(confidence)], relation_hashes=[rel_hash])
 
@@ -231,4 +235,3 @@ class ImportService:
             if current:
                 out.append(current.strip())
         return out
-

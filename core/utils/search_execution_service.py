@@ -425,8 +425,8 @@ class SearchExecutionService:
                     "type": getattr(item, "result_type", ""),
                     "score": float(getattr(item, "score", 0.0)),
                     "content": getattr(item, "content", ""),
+                    "source": getattr(item, "source", ""),
                     "metadata": metadata,
                 }
             )
         return serialized
-

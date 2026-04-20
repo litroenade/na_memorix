@@ -219,6 +219,41 @@ class DualPathRetriever:
         self._ac_matcher: Optional[AhoCorasick] = None
         self._ac_nodes_count = 0
 
+    @staticmethod
+    def _paragraph_result_metadata(
+        paragraph: Dict[str, Any],
+        *,
+        time_meta: Dict[str, Any],
+        bm25_score: float | None = None,
+    ) -> Dict[str, Any]:
+        metadata = dict(paragraph.get("metadata", {}) or {})
+        metadata["record_source"] = str(paragraph.get("source", "") or "")
+        metadata["word_count"] = paragraph.get("word_count", 0)
+        metadata["time_meta"] = time_meta
+        if bm25_score is not None:
+            metadata["bm25_score"] = float(bm25_score)
+        return metadata
+
+    @staticmethod
+    def _relation_result_metadata(
+        relation: Dict[str, Any],
+        *,
+        time_meta: Dict[str, Any] | None,
+        bm25_score: float | None = None,
+        pivot_entity: str | None = None,
+    ) -> Dict[str, Any]:
+        metadata = dict(relation.get("metadata", {}) or {})
+        metadata["subject"] = relation["subject"]
+        metadata["predicate"] = relation["predicate"]
+        metadata["object"] = relation["object"]
+        metadata["confidence"] = relation.get("confidence", 1.0)
+        metadata["time_meta"] = time_meta
+        if pivot_entity:
+            metadata["pivot_entity"] = pivot_entity
+        if bm25_score is not None:
+            metadata["bm25_score"] = float(bm25_score)
+        return metadata
+
     async def retrieve(
         self,
         query: str,
@@ -399,11 +434,11 @@ class DualPathRetriever:
                     score=float(row.get("score", 0.0)),
                     result_type="paragraph",
                     source="sparse_bm25",
-                    metadata={
-                        "word_count": paragraph.get("word_count", 0),
-                        "time_meta": time_meta,
-                        "bm25_score": float(row.get("bm25_score", 0.0)),
-                    },
+                    metadata=self._paragraph_result_metadata(
+                        paragraph,
+                        time_meta=time_meta,
+                        bm25_score=float(row.get("bm25_score", 0.0)),
+                    ),
                 )
             )
         results = self._apply_temporal_filter_to_paragraphs(results, temporal)
@@ -447,14 +482,11 @@ class DualPathRetriever:
                     score=float(row.get("score", 0.0)),
                     result_type="relation",
                     source="sparse_relation_bm25",
-                    metadata={
-                        "subject": relation["subject"],
-                        "predicate": relation["predicate"],
-                        "object": relation["object"],
-                        "confidence": relation.get("confidence", 1.0),
-                        "time_meta": relation_time_meta,
-                        "bm25_score": float(row.get("bm25_score", 0.0)),
-                    },
+                    metadata=self._relation_result_metadata(
+                        relation,
+                        time_meta=relation_time_meta,
+                        bm25_score=float(row.get("bm25_score", 0.0)),
+                    ),
                 )
             )
 
@@ -527,10 +559,7 @@ class DualPathRetriever:
                         score=float(score),
                         result_type="paragraph",
                         source="paragraph_search",
-                        metadata={
-                            "word_count": paragraph.get("word_count", 0),
-                            "time_meta": time_meta,
-                        },
+                        metadata=self._paragraph_result_metadata(paragraph, time_meta=time_meta),
                     )
                 )
             vector_results = self._apply_temporal_filter_to_paragraphs(vector_results, temporal)
@@ -618,14 +647,11 @@ class DualPathRetriever:
                             score=float(score),
                             result_type="relation",
                             source="relation_search (via entity)",
-                            metadata={
-                                "subject": rel["subject"],
-                                "predicate": rel["predicate"],
-                                "object": rel["object"],
-                                "confidence": rel.get("confidence", 1.0),
-                                "pivot_entity": entity_name,
-                                "time_meta": relation_time_meta,
-                            },
+                            metadata=self._relation_result_metadata(
+                                rel,
+                                time_meta=relation_time_meta,
+                                pivot_entity=entity_name,
+                            ),
                         )
                     )
 
@@ -837,10 +863,7 @@ class DualPathRetriever:
                 score=float(score),
                 result_type="paragraph",
                 source="paragraph_search",
-                metadata={
-                    "word_count": paragraph.get("word_count", 0),
-                    "time_meta": time_meta,
-                },
+                metadata=self._paragraph_result_metadata(paragraph, time_meta=time_meta),
             ))
 
         return self._apply_temporal_filter_to_paragraphs(results, temporal)
@@ -885,13 +908,7 @@ class DualPathRetriever:
                 score=float(score),
                 result_type="relation",
                 source="relation_search",
-                metadata={
-                    "subject": relation["subject"],
-                    "predicate": relation["predicate"],
-                    "object": relation["object"],
-                    "confidence": relation.get("confidence", 1.0),
-                    "time_meta": relation_time_meta,
-                },
+                metadata=self._relation_result_metadata(relation, time_meta=relation_time_meta),
             ))
 
         return self._apply_temporal_filter_to_relations(results, temporal)
@@ -1062,10 +1079,7 @@ class DualPathRetriever:
                     score=1.0,
                     result_type="paragraph",
                     source="temporal_scan",
-                    metadata={
-                        "word_count": para.get("word_count", 0),
-                        "time_meta": time_meta,
-                    },
+                    metadata=self._paragraph_result_metadata(para, time_meta=time_meta),
                 )
             )
 
@@ -1323,4 +1337,3 @@ class DualPathRetriever:
             f"para_k={self.config.top_k_paragraphs}, "
             f"rel_k={self.config.top_k_relations})"
         )
-

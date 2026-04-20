@@ -19,12 +19,15 @@ from pydantic import Field
 from nekro_agent.api import i18n
 from nekro_agent.api.plugin import ConfigBase, ExtraField, NekroPlugin, SandboxMethodType
 from nekro_agent.core.config import config as app_config
+from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.schemas.agent_ctx import AgentCtx
 
+from amemorix.common.logging import bind_plugin_logger
 from amemorix.services import ImportService, QueryService, SummaryService
 from amemorix.settings import AppSettings, DEFAULT_CONFIG, _deep_merge
 
+from .native_memory_sync import filter_native_results_for_workspace, sync_builtin_memories
 from .core.utils.runtime_dependencies import get_runtime_dependency_report
 
 sys.modules.setdefault("server", importlib.import_module(f"{__package__}.server"))
@@ -47,6 +50,7 @@ plugin = NekroPlugin(
     allow_sleep=True,
     sleep_brief="用于长期记忆检索、图谱知识导入与当前聊天上下文的自动记忆注入。",
 )
+bind_plugin_logger(plugin)
 
 _PROJECT_REPO_URL = "https://github.com/litroenade/na_memorix"
 _WEB_PANEL_ROOT = f"/plugins/{plugin.key}/"
@@ -198,6 +202,35 @@ class NaMemorixConfig(ConfigBase):
         description_en="Only memory candidates with similarity scores above this threshold will be injected automatically.",
         ge=0.0,
         le=1.0,
+    )
+    BUILTIN_MEMORY_SYNC_ENABLED: bool = _config_field(
+        True,
+        category_zh="原生记忆同步",
+        category_en="Native Memory Sync",
+        title_zh="启用原生记忆同步",
+        title_en="Enable Native Memory Sync",
+        description_zh="自动把 Nekro Agent 原生记忆表中的新增段落与关系镜像导入到 na_memorix，并在当前工作区内参与检索。",
+        description_en="Automatically mirrors newly consolidated Nekro Agent native memories into na_memorix and makes them retrievable inside the current workspace.",
+    )
+    BUILTIN_MEMORY_SYNC_BATCH_SIZE: int = _config_field(
+        64,
+        category_zh="原生记忆同步",
+        category_en="Native Memory Sync",
+        title_zh="原生记忆同步批量大小",
+        title_en="Native Memory Sync Batch Size",
+        description_zh="每次自动同步时，最多补入多少条原生记忆记录。数值越大，单次补齐越快，但耗时也会增加。",
+        description_en="Maximum number of native memory records mirrored per automatic sync run. Higher values catch up faster but increase per-run cost.",
+        ge=1,
+        le=500,
+    )
+    BUILTIN_MEMORY_SYNC_INCLUDE_RELATIONS: bool = _config_field(
+        True,
+        category_zh="原生记忆同步",
+        category_en="Native Memory Sync",
+        title_zh="同步原生关系图",
+        title_en="Mirror Native Relations",
+        description_zh="开启后会同步 Nekro 原生记忆中的实体关系，不仅导入段落文本，也导入图关系。",
+        description_en="When enabled, mirrors entity relations from Nekro native memory in addition to paragraph text.",
     )
     CHAT_FILTER_ENABLED: bool = _config_field(
         False,
@@ -1095,6 +1128,31 @@ async def _build_recent_query_text(_ctx: AgentCtx, limit: int = 6) -> str:
     return "\n".join(items[-limit:])
 
 
+async def _get_workspace_id_for_ctx(_ctx: AgentCtx) -> int | None:
+    chat_key = str(_ctx.from_chat_key or "").strip()
+    if not chat_key:
+        return None
+    channel = await DBChatChannel.get_or_none(chat_key=chat_key)
+    if channel is None or channel.workspace_id is None:
+        return None
+    return int(channel.workspace_id)
+
+
+async def _sync_builtin_memory_for_ctx(_ctx: AgentCtx, ctx: Any, cfg: NaMemorixConfig) -> int | None:
+    workspace_id = await _get_workspace_id_for_ctx(_ctx)
+    if workspace_id is None or not bool(cfg.BUILTIN_MEMORY_SYNC_ENABLED):
+        return workspace_id
+    await sync_builtin_memories(
+        ctx=ctx,
+        plugin_store=plugin.store,
+        workspace_id=workspace_id,
+        batch_size=int(cfg.BUILTIN_MEMORY_SYNC_BATCH_SIZE),
+        include_relations=bool(cfg.BUILTIN_MEMORY_SYNC_INCLUDE_RELATIONS),
+        logger=plugin.logger,
+    )
+    return workspace_id
+
+
 @plugin.mount_prompt_inject_method("na_memorix_prompt")
 async def na_memorix_prompt(_ctx: AgentCtx) -> str:
     cfg = plugin.get_config(NaMemorixConfig)
@@ -1109,15 +1167,21 @@ async def na_memorix_prompt(_ctx: AgentCtx) -> str:
         ):
             return ""
 
+        workspace_id = await _sync_builtin_memory_for_ctx(_ctx, ctx, cfg)
+
         query_text = await _build_recent_query_text(_ctx)
         if not query_text:
             return ""
 
         service = QueryService(ctx)
         result = await service.search(query=query_text, top_k=int(cfg.AUTO_INJECT_TOP_K))
+        filtered_results = filter_native_results_for_workspace(
+            list(result.get("results", [])),
+            workspace_id,
+        )
         items = [
             item
-            for item in result.get("results", [])
+            for item in filtered_results
             if float(item.get("score", 0.0) or 0.0) >= float(cfg.AUTO_INJECT_MIN_SCORE)
         ]
         if not items:
@@ -1139,9 +1203,13 @@ async def na_memorix_prompt(_ctx: AgentCtx) -> str:
 
 @plugin.mount_sandbox_method(SandboxMethodType.TOOL, "搜索记忆", description="在 na_memorix 记忆库中搜索相关知识。")
 async def memorix_search(_ctx: AgentCtx, query: str, top_k: int = 5):
-    del _ctx
     async with runtime_scope() as ctx:
-        return await QueryService(ctx).search(query=query, top_k=top_k)
+        cfg = plugin.get_config(NaMemorixConfig)
+        workspace_id = await _sync_builtin_memory_for_ctx(_ctx, ctx, cfg)
+        result = await QueryService(ctx).search(query=query, top_k=top_k)
+        result["results"] = filter_native_results_for_workspace(list(result.get("results", [])), workspace_id)
+        result["count"] = len(result["results"])
+        return result
 
 
 @plugin.mount_sandbox_method(SandboxMethodType.TOOL, "导入记忆文本", description="向 na_memorix 导入一段文本知识。")
