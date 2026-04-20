@@ -14,7 +14,6 @@
 
 ## Web 界面入口
 
-- [打开统一入口页](/plugins/litroenade.na_memorix/launcher)
 - [打开主面板](/plugins/litroenade.na_memorix/)
 - [打开导入中心](/plugins/litroenade.na_memorix/import)
 - [打开检索调优](/plugins/litroenade.na_memorix/tuning)

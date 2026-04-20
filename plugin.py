@@ -25,7 +25,6 @@ from nekro_agent.schemas.agent_ctx import AgentCtx
 from amemorix.services import ImportService, QueryService, SummaryService
 from amemorix.settings import AppSettings, DEFAULT_CONFIG, _deep_merge
 
-# 为复制过来的 A_Memorix 模块保留旧的绝对导入兼容。
 sys.modules.setdefault("server", importlib.import_module(f"{__package__}.server"))
 
 plugin = NekroPlugin(
@@ -49,8 +48,7 @@ plugin = NekroPlugin(
 
 _PROJECT_REPO_URL = "https://github.com/litroenade/na_memorix"
 _WEB_PANEL_ROOT = f"/plugins/{plugin.key}/"
-_WEB_PANEL_LAUNCHER = f"{_WEB_PANEL_ROOT}launcher"
-plugin.url = _WEB_PANEL_LAUNCHER
+plugin.url = _PROJECT_REPO_URL
 _WEB_PANEL_LINK_STYLE_PRIMARY = (
     "display:inline-flex;align-items:center;justify-content:center;"
     "padding:6px 12px;border-radius:999px;text-decoration:none;"
@@ -78,8 +76,7 @@ def _panel_link(label: str, href: str, *, primary: bool = False) -> str:
 _WEB_PANEL_LINKS_ZH = (
     "界面入口："
     "<div style='display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;'>"
-    f"{_panel_link('打开入口页', _WEB_PANEL_LAUNCHER, primary=True)}"
-    f"{_panel_link('主面板', _WEB_PANEL_ROOT)}"
+    f"{_panel_link('主面板', _WEB_PANEL_ROOT, primary=True)}"
     f"{_panel_link('导入中心', f'{_WEB_PANEL_ROOT}import')}"
     f"{_panel_link('检索调优', f'{_WEB_PANEL_ROOT}tuning')}"
     f"{_panel_link('项目仓库', _PROJECT_REPO_URL)}"
@@ -88,8 +85,7 @@ _WEB_PANEL_LINKS_ZH = (
 _WEB_PANEL_LINKS_EN = (
     "Panel entry: "
     "<div style='display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;'>"
-    f"{_panel_link('Open Launcher', _WEB_PANEL_LAUNCHER, primary=True)}"
-    f"{_panel_link('Main Panel', _WEB_PANEL_ROOT)}"
+    f"{_panel_link('Main Panel', _WEB_PANEL_ROOT, primary=True)}"
     f"{_panel_link('Import Center', f'{_WEB_PANEL_ROOT}import')}"
     f"{_panel_link('Retrieval Tuning', f'{_WEB_PANEL_ROOT}tuning')}"
     f"{_panel_link('Repository', _PROJECT_REPO_URL)}"
