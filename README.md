@@ -43,10 +43,13 @@
 
 ### 动态依赖与运行前置条件
 
-- 图存储依赖 `SciPy`。
-- 插件已接入 Nekro 的 `dynamic_import_pkg(...)` 动态依赖导入机制；当宿主环境缺少 `scipy` 时，会在首次需要图运行时时尝试自动安装。
-- 如果宿主无法访问配置的 PyPI 镜像，或动态安装失败，`/api/ui_capabilities` 与主面板会直接提示依赖缺失原因，导入中心和检索调优页会自动退化到兼容说明模式。
-- 若需要手动预装，请确保宿主 Python 环境可导入 `scipy`，并允许插件进程写入 Nekro 的动态包目录。
+- 宿主 `nekro-agent` 已自带 `openai`、`psycopg2-binary`、`qdrant-client` 等核心依赖，`na_memorix` 直接复用，不重复做动态安装。
+- 插件额外接入了 Nekro 的 `dynamic_import_pkg(...)` 动态依赖导入机制，当前按需注入的依赖有：
+  - `scipy`：图存储首次初始化时尝试安装。
+  - `jieba`：中文检索首次进入 `jieba`/`mixed` 分词路径时尝试安装。
+  - `sentence-transformers`：本地 embedding 模型首次加载时尝试安装。
+- 如果宿主无法访问配置的 PyPI 镜像，或动态安装失败，`/api/ui_capabilities` 与主面板会直接提示依赖缺失原因；硬依赖未就绪时，导入中心和检索调优页会自动退化到兼容说明模式。
+- 若需要手动预装，请确保宿主 Python 环境至少可导入 `scipy`、`jieba`、`sentence_transformers`，并允许插件进程写入 Nekro 的动态包目录。
 
 ### 插件数据目录
 

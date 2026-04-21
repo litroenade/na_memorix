@@ -13,12 +13,6 @@ from typing import Optional, Union, List, Dict, Any, Tuple
 
 import numpy as np
 
-try:
-    from sentence_transformers import SentenceTransformer
-    HAS_SENTENCE_TRANSFORMERS = True
-except ImportError:
-    HAS_SENTENCE_TRANSFORMERS = False
-
 from amemorix.common.logging import get_logger
 from .presets import (
     EmbeddingModelConfig,
@@ -27,8 +21,10 @@ from .presets import (
     are_models_compatible,
 )
 from ..utils.quantization import QuantizationType
+from ..utils.runtime_dependencies import load_sentence_transformers
 
 logger = get_logger("A_Memorix.EmbeddingManager")
+SentenceTransformer = Any
 
 
 class EmbeddingManager:
@@ -65,19 +61,13 @@ class EmbeddingManager:
             enable_cache: 是否启用缓存
             num_workers: 工作线程数
         """
-        if not HAS_SENTENCE_TRANSFORMERS:
-            raise ImportError(
-                "sentence-transformers 未安装，请安装: "
-                "pip install sentence-transformers"
-            )
-
         self.config = config
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.enable_cache = enable_cache
         self.num_workers = max(1, num_workers)
 
         # 模型实例
-        self._model: Optional[SentenceTransformer] = None
+        self._model: Optional[Any] = None
         self._model_lock = threading.Lock()
 
         # 缓存
@@ -107,13 +97,17 @@ class EmbeddingManager:
             logger.info(f"正在加载模型: {self.config.model_name}")
 
             try:
+                sentence_transformers_module = load_sentence_transformers(install_if_missing=True)
+                if sentence_transformers_module is None:
+                    raise ImportError("sentence-transformers 不可用，且动态安装失败")
+                sentence_transformer_cls = getattr(sentence_transformers_module, "SentenceTransformer")
                 # 构建模型参数
                 model_kwargs = {}
                 if self.config.cache_dir:
                     model_kwargs["cache_folder"] = self.config.cache_dir
 
                 # 加载模型
-                self._model = SentenceTransformer(
+                self._model = sentence_transformer_cls(
                     self.config.model_path,
                     **model_kwargs,
                 )

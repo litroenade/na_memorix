@@ -7,16 +7,9 @@ from typing import Any, Dict, List, Optional
 from amemorix.common.logging import get_logger
 
 from ..storage import MetadataStore
+from ..utils.runtime_dependencies import load_jieba, probe_jieba
 
 logger = get_logger("A_Memorix.SparseBM25")
-
-try:
-    import jieba  # type: ignore
-
-    HAS_JIEBA = True
-except Exception:
-    HAS_JIEBA = False
-    jieba = None
 
 
 @dataclass
@@ -147,13 +140,14 @@ class SparseBM25Index:
             return
         if self.config.tokenizer_mode not in {"jieba", "mixed"}:
             return
-        if not HAS_JIEBA:
+        jieba_module = load_jieba(install_if_missing=True)
+        if jieba_module is None:
             logger.warning("jieba unavailable, sparse tokenizer will fall back to char n-grams")
             return
         user_dict = str(self.config.jieba_user_dict or "").strip()
         if user_dict:
             try:
-                jieba.load_userdict(user_dict)  # type: ignore[union-attr]
+                jieba_module.load_userdict(user_dict)
                 logger.info("Loaded jieba user dict: %s", user_dict)
             except Exception as exc:
                 logger.warning("Failed to load jieba user dict: %s", exc)
@@ -178,10 +172,11 @@ class SparseBM25Index:
         Returns:
             List[str]: 归一化后的词元列表。
         """
-        if not HAS_JIEBA:
+        jieba_module = load_jieba(install_if_missing=True)
+        if jieba_module is None:
             return []
         try:
-            tokens = list(jieba.cut_for_search(text))  # type: ignore[union-attr]
+            tokens = list(jieba_module.cut_for_search(text))
         except Exception:
             return []
         return [token.strip().lower() for token in tokens if token and token.strip()]
@@ -448,7 +443,7 @@ class SparseBM25Index:
             "enable_like_fallback": self.config.enable_like_fallback,
             "enable_relation_sparse_fallback": self.config.enable_relation_sparse_fallback,
             "loaded": bool(self._loaded),
-            "has_jieba": HAS_JIEBA,
+            "has_jieba": bool(probe_jieba().available),
             "doc_count": doc_count,
             "candidate_k": self.config.candidate_k,
             "relation_candidate_k": self.config.relation_candidate_k,

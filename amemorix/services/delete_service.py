@@ -129,10 +129,15 @@ class DeleteService:
                     if len(parts) != 3:
                         raise ValueError("relation format should be subject predicate object")
                     s, p, o = parts
-                rel_hash = compute_hash(f"{s.lower()}|{p.lower()}|{o.lower()}")
-                relation = self.ctx.metadata_store.get_relation(rel_hash)
-                if not relation:
+                matches = self.ctx.metadata_store.get_relations(subject=s, predicate=p, object=o)
+                if not matches:
                     raise ValueError("relation not found")
+                if len(matches) != 1:
+                    raise ValueError("multiple relations matched, use hash")
+                relation = matches[0]
+                rel_hash = str(relation.get("hash", "") or "").strip().lower()
+                if not rel_hash:
+                    raise ValueError("relation hash missing")
 
             deleted_count = self.ctx.metadata_store.backup_and_delete_relations([rel_hash])
             if int(deleted_count) <= 0:

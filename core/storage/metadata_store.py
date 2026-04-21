@@ -15,9 +15,13 @@ from nekro_agent.core.tortoise_config import resolve_db_url
 
 from amemorix.common.logging import get_logger
 from ..utils.hash import compute_hash, normalize_text
+from ..utils.runtime_dependencies import load_jieba
 from ..utils.time_parser import normalize_time_meta
 
 logger = get_logger("A_Memorix.MetadataStore")
+
+_BUILTIN_SOURCE_PREFIX = "builtin_memory:"
+_CHAT_SUMMARY_SOURCE_PREFIX = "chat_summary:"
 
 _TABLE_NAMES = (
     "paragraphs",
@@ -39,15 +43,6 @@ _TABLE_NAMES = (
     "transcript_messages",
     "async_tasks",
 )
-
-try:
-    import jieba  # type: ignore
-
-    HAS_JIEBA = True
-except Exception:
-    HAS_JIEBA = False
-    jieba = None
-
 
 def _json_default(value: Any) -> Any:
     """为 JSON 序列化提供扩展类型转换。
@@ -111,6 +106,54 @@ def _decode_json(raw: Any, default: Any) -> Any:
             return pickle.loads(raw if isinstance(raw, (bytes, bytearray)) else str(raw).encode("latin1"))
         except Exception:
             return default
+
+
+def _parse_builtin_workspace_id(value: Any) -> Optional[int]:
+    text = str(value or "").strip()
+    if not text.startswith(_BUILTIN_SOURCE_PREFIX):
+        return None
+    parts = text.split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_chat_summary_chat_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text.startswith(_CHAT_SUMMARY_SOURCE_PREFIX):
+        return ""
+    return text[len(_CHAT_SUMMARY_SOURCE_PREFIX) :].strip()
+
+
+def _resolve_scope_namespace(source: str, metadata: Optional[Dict[str, Any]] = None) -> str:
+    metadata_dict = dict(metadata or {})
+    normalized_source = str(
+        source or metadata_dict.get("record_source", "") or metadata_dict.get("source", "") or ""
+    ).strip()
+
+    workspace_id: Optional[int] = None
+    workspace_raw = metadata_dict.get("builtin_workspace_id")
+    if workspace_raw is not None:
+        try:
+            workspace_id = int(workspace_raw)
+        except (TypeError, ValueError):
+            workspace_id = None
+    if workspace_id is None:
+        workspace_id = _parse_builtin_workspace_id(normalized_source)
+
+    chat_key = str(metadata_dict.get("chat_summary_chat_key", "") or "").strip()
+    if not chat_key:
+        chat_key = _parse_chat_summary_chat_key(normalized_source)
+
+    scope_parts: List[str] = []
+    if workspace_id is not None:
+        scope_parts.append(f"workspace:{workspace_id}")
+    if chat_key:
+        scope_parts.append(f"chat:{chat_key}")
+    return "|".join(scope_parts)
 
 
 class _CompatCursor:
@@ -363,12 +406,13 @@ class MetadataStore:
 
         mode = str(tokenizer_mode or "mixed").strip().lower()
         tokens: List[str] = []
-        if mode in {"jieba", "mixed"} and HAS_JIEBA:
+        jieba_module = load_jieba(install_if_missing=mode in {"jieba", "mixed"})
+        if mode in {"jieba", "mixed"} and jieba_module is not None:
             try:
                 tokens.extend(
                     [
                         token.strip().lower()
-                        for token in jieba.cut_for_search(raw)  # type: ignore[union-attr]
+                        for token in jieba_module.cut_for_search(raw)
                         if token and token.strip()
                     ]
                 )
@@ -624,9 +668,14 @@ class MetadataStore:
                     is_permanent INTEGER DEFAULT 0,
                     is_pinned INTEGER DEFAULT 0,
                     protected_until DOUBLE PRECISION,
-                    last_reinforced DOUBLE PRECISION,
-                    CONSTRAINT {self.table_prefix}_relations_unique UNIQUE (subject_canonical, predicate_canonical, object_canonical)
+                    last_reinforced DOUBLE PRECISION
                 )
+                """
+            )
+            cursor.execute(
+                f"""
+                ALTER TABLE {self._table('relations')}
+                DROP CONSTRAINT IF EXISTS {self.table_prefix}_relations_unique
                 """
             )
             cursor.execute(
@@ -898,7 +947,9 @@ class MetadataStore:
         text = normalize_text(content)
         if not text:
             raise ValueError("Paragraph content cannot be empty")
-        hash_value = compute_hash(text)
+        scope_namespace = _resolve_scope_namespace(str(source or ""), metadata)
+        hash_basis = f"{scope_namespace}\n{text}" if scope_namespace else text
+        hash_value = compute_hash(hash_basis)
         now = time.time()
         normalized_time = normalize_time_meta(time_meta or {})
         search_lexemes = self._build_search_lexemes(text)
@@ -1000,7 +1051,16 @@ class MetadataStore:
         if not all((s_canon, p_canon, o_canon)):
             raise ValueError("Relation components cannot be empty")
         relation_key = f"{s_canon}|{p_canon}|{o_canon}"
-        hash_value = compute_hash(relation_key)
+        scope_namespace = _resolve_scope_namespace("", metadata)
+        if not scope_namespace and source_paragraph:
+            paragraph = self.get_paragraph(str(source_paragraph or "").strip())
+            if paragraph is not None:
+                scope_namespace = _resolve_scope_namespace(
+                    str(paragraph.get("source", "") or ""),
+                    dict(paragraph.get("metadata", {}) or {}),
+                )
+        hash_basis = f"{scope_namespace}|{relation_key}" if scope_namespace else relation_key
+        hash_value = compute_hash(hash_basis)
         now = time.time()
         relation_text = f"{subject} {predicate} {obj}"
         search_lexemes = self._build_search_lexemes(relation_text)
