@@ -1,6 +1,6 @@
 # na_memorix
 
-`na_memorix` 是一个基于 A_memorix 特化为 Nekro Agent 的知识库/记忆插件。它保留了核心检索与图谱处理链路，但将运行方式、存储后端和宿主集成方式改成了更适合 Nekro 插件体系的实现。
+`na_memorix` 是一个基于 [A_memorix](https://github.com/A-Dawn/A_memorix) 特化为 Nekro Agent 的知识库/记忆插件。它保留了核心检索与图谱处理链路，但将运行方式、存储后端和宿主集成方式改成了更适合 Nekro 插件体系的实现。
 
 ## Web 界面入口
 
