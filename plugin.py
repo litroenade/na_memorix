@@ -1468,6 +1468,15 @@ async def na_memorix_prompt(_ctx: AgentCtx) -> str:
 
 @plugin.mount_sandbox_method(SandboxMethodType.TOOL, "搜索记忆", description="在 na_memorix 记忆库中搜索相关知识。")
 async def memorix_search(_ctx: AgentCtx, query: str, top_k: int = 5):
+    """在 na_memorix 记忆库中按语义搜索相关段落和关系。
+
+    Args:
+        query: 搜索关键词或问题。
+        top_k: 最多返回的候选结果数量。
+
+    Returns:
+        检索结果字典，包含匹配条目、分数和来源信息。
+    """
     async with runtime_scope() as ctx:
         cfg = plugin.get_config(NaMemorixConfig)
         workspace_id = await _sync_builtin_memory_for_ctx(_ctx, ctx, cfg)
@@ -1484,6 +1493,15 @@ async def memorix_search(_ctx: AgentCtx, query: str, top_k: int = 5):
 
 @plugin.mount_sandbox_method(SandboxMethodType.TOOL, "导入记忆文本", description="向 na_memorix 导入一段文本知识。")
 async def memorix_import_text(_ctx: AgentCtx, text: str, source: str = ""):
+    """向 na_memorix 导入一段文本知识，供后续检索和记忆注入使用。
+
+    Args:
+        text: 需要写入记忆库的文本内容。
+        source: 可选来源标记；为空时使用当前聊天作为来源。
+
+    Returns:
+        导入结果字典，包含写入模式、段落数量和哈希信息。
+    """
     async with runtime_scope() as ctx:
         src = source.strip() or f"chat:{_ctx.from_chat_key or 'manual'}"
         return await ImportService(ctx).import_text(text=text, source=src)
@@ -1495,6 +1513,14 @@ async def memorix_import_text(_ctx: AgentCtx, text: str, source: str = ""):
     description="将当前聊天最近消息总结后写入 na_memorix。",
 )
 async def memorix_import_current_chat_summary(_ctx: AgentCtx, context_length: int = 50):
+    """总结当前聊天最近消息并写入 na_memorix 长期记忆。
+
+    Args:
+        context_length: 用于总结的最近聊天消息数量。
+
+    Returns:
+        总结导入结果字典，包含是否成功和状态消息。
+    """
     async with runtime_scope() as ctx:
         chat_key = _ctx.from_chat_key or ""
         if not chat_key:
@@ -1523,6 +1549,11 @@ async def memorix_import_current_chat_summary(_ctx: AgentCtx, context_length: in
 
 @plugin.mount_sandbox_method(SandboxMethodType.TOOL, "记忆状态", description="查看 na_memorix 当前状态统计。")
 async def memorix_status(_ctx: AgentCtx):
+    """查看 na_memorix 当前存储与索引状态统计。
+
+    Returns:
+        状态统计字典，包含段落、实体、关系和任务数量等信息。
+    """
     del _ctx
     async with runtime_scope() as ctx:
         return await QueryService(ctx).stats()
@@ -1534,6 +1565,14 @@ async def memorix_status(_ctx: AgentCtx):
     description="Rebuild na_memorix Qdrant vectors from PostgreSQL",
 )
 async def memorix_reindex(_ctx: AgentCtx, batch_size: int = 32):
+    """从 PostgreSQL 元数据重建 na_memorix 向量索引。
+
+    Args:
+        batch_size: 每批重建的记录数量。
+
+    Returns:
+        后台重建任务信息，包含 task_id、status 和 created_at。
+    """
     del _ctx
     manager = await ensure_task_manager_started()
     task = await manager.enqueue_reindex_task({"batch_size": max(1, int(batch_size))})
